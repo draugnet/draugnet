@@ -1,0 +1,3 @@
+[submodule "misp-objects"]
+	path = misp-objects
+	url = https://github.com/MISP/misp-objects.git

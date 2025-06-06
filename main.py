@@ -1,0 +1,285 @@
+from fastapi import Request, FastAPI, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pymisp import MISPEvent
+from typing import Optional
+from settings import misp_config, redis_config, abracadabra_config
+import logging
+import json
+import os
+
+from utils import *
+
+app = FastAPI()
+logger = logging.getLogger('uvicorn.error')
+logger.setLevel(logging.DEBUG)
+
+# List all allowed frontend origins here
+origins = [
+    "http://localhost:8998",  # Frontend origin
+    "http://localhost:8999",  # Backend if accessed via browser (optional)
+    # Add any deployed URLs if needed
+    "http://localhost:5007"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Could also be ["*"] for all, but it's more secure to specify
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
+@app.get("/share")
+async def root():
+    return {
+        "formats": {
+            "misp": {
+                "name": "MISP",
+                "description": "MISP format",
+                "url": "/share/misp",
+                "method": "POST",
+            },
+            "raw": {
+                "name": "Raw",
+                "description": "Raw format for freetext parsing",
+                "url": "/share/raw",
+                "method": "POST"
+            },
+            "objects": {
+                "name": "Objects",
+                "description": "Data encoded as MISP Objects",
+                "url": "/share/objects",
+                "method": "POST"
+            }
+        }
+    }
+
+@app.post("/share/misp")
+async def share_misp_event(request: Request) -> JSONResponse:
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    data = await request.body()
+
+    event = MISPEvent()
+    event.from_json(data)
+
+    saved_event = pymisp.add_event(event)
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not save event to MISP.")
+    
+    token = generate_token()
+    if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
+        raise HTTPException(status_code=500, detail="Could not store token.")
+
+    return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
+
+@app.post("/share/misp/{token}")
+async def update_misp_event(token: str, request: Request):
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    data = await request.body()
+    
+    event = MISPEvent()
+    event.from_json(data)
+    uuid = token_to_uuid(token)
+    if not uuid:
+        raise HTTPException(status_code=404, detail="Invalid token.")
+    # if event.objects exists, loop through them and add them to existing_event
+    event.uuid = uuid
+    saved_event = pymisp.update_event(event, event_id=uuid)
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not update event in MISP.")
+    touch_token(token)
+    return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
+
+@app.post("/share/raw")
+async def post_raw(request: Request):
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    raw_text = await request.body()
+    raw_text_str = raw_text.decode("utf-8").strip()
+
+    if not raw_text_str:
+        raise HTTPException(status_code=400, detail="Empty report body.")
+
+    saved_event = create_misp_event(pymisp, logger)
+
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error creating event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not create MISP event.")
+
+    event_uuid = saved_event["Event"]["uuid"]
+
+    event_report = create_report(raw_text_str, event_uuid)
+    try:
+        response = pymisp.add_event_report(event_uuid, event_report)
+        if isinstance(response, dict) and "errors" in response:
+            logger.error(f"Error adding event report: {json.dumps(response['errors'])}")
+            raise HTTPException(status_code=500, detail="Could not attach event report.")
+    except Exception as e:
+        logger.exception("Exception while adding event report.")
+        raise HTTPException(status_code=500, detail=str(e))
+    report_uuid = response["EventReport"]["uuid"]
+
+    try:
+        result = extract_report_entities(pymisp, report_uuid)
+        if isinstance(result, dict) and "errors" in result:
+            raise HTTPException(status_code=500, detail="Could not extract entities from report.")
+    except Exception as e:
+        logger.exception("Exception while extracting entities from report.")
+        raise HTTPException(status_code=500, detail=str(e))
+    # Generate and store token
+    token = generate_token()
+    if not store_token_to_uuid(token, event_uuid):
+        raise HTTPException(status_code=500, detail="Could not store token.")
+
+    return {"token": token, "event_uuid": event_uuid, "status": "ok"}
+
+@app.put("/share/raw/{token}")
+async def put_raw(token: str, request: Request):
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    uuid = token_to_uuid(token)
+    if not uuid:
+        raise HTTPException(status_code=404, detail="Invalid token.")
+
+    raw_text = await request.body()
+    raw_text_str = raw_text.decode("utf-8").strip()
+
+    if not raw_text_str:
+        raise HTTPException(status_code=400, detail="Empty report body.")
+
+    event = create_misp_event(pymisp, logger, token)
+
+    if isinstance(event, dict) and "errors" in event:
+        logger.error(f"Error creating event: {json.dumps(event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not create MISP event.")
+
+    event_uuid = event["Event"]["uuid"]
+
+    event_report = create_report(raw_text_str, event_uuid)
+    try:
+        response = pymisp.add_event_report(event_uuid, event_report)
+        if isinstance(response, dict) and "errors" in response:
+            logger.error(f"Error adding event report: {json.dumps(response['errors'])}")
+            raise HTTPException(status_code=500, detail="Could not attach event report.")
+    except Exception as e:
+        logger.exception("Exception while adding event report.")
+        raise HTTPException(status_code=500, detail=str(e))
+    report_uuid = response["EventReport"]["uuid"]
+
+    try:
+        result = extract_report_entities(pymisp, report_uuid)
+        if isinstance(result, dict) and "errors" in result:
+            raise HTTPException(status_code=500, detail="Could not extract entities from report.")
+    except Exception as e:
+        logger.exception("Exception while extracting entities from report.")
+        raise HTTPException(status_code=500, detail=str(e))
+    # Generate and store token
+    touch_token(token)
+    return {"token": token, "event_uuid": event_uuid, "status": "ok"}
+
+
+@app.post("/share/objects")
+async def post_objects():
+    return {"token": generate_token(), "status": "ok"}
+
+@app.post("/share/objects/{token}")
+async def post_objects(token: str):
+    return {"token": token, "status": "ok"}
+
+@app.get("/retrieve/{token}")
+async def retrieve_event(
+    token: str,
+    format: str = Query("json", enum=["json", "csv", "suricata", "text", "stix", "stix2"])
+):
+    uuid = token_to_uuid(token)
+    if not uuid:
+        return {"error": "Could not retieve the token."}
+    pymisp = get_misp()
+    if not format:
+        format = "json"
+    r = pymisp.search(
+        controller='events',
+        eventid = uuid,
+        return_format=format,
+        includeAnalystData=True
+    )
+    if format == "json" or format == "stix2":
+        return JSONResponse(content=r)
+    else:
+        return PlainTextResponse(content=r)
+    
+@app.get("/timestamp/{token}")
+async def retrieve_last_update_timestamp(
+    token: str
+):
+    timestamp = get_token_timestamp(token)
+    if timestamp is None:
+        raise HTTPException(status_code=404, detail="Token not found.")
+    return PlainTextResponse(content=str(timestamp))
+
+
+@app.get("/object_templates")
+async def get_object_template(
+    template: Optional[str] = Query(
+        None,
+        description="Template name (alphanumeric and dashes only)"
+    )
+):
+    if template:
+        if not is_valid_template_name(template):
+            raise HTTPException(status_code=400, detail="Invalid template name.")
+
+        template_path = os.path.join(OBJECTS_DIR, template, "definition.json")
+
+        if not os.path.isfile(template_path):
+            raise HTTPException(status_code=404, detail="Template not found.")
+
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                definition = json.load(f)
+            return JSONResponse(content=definition)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read template: {str(e)}")
+
+    # If no template is provided, list available templates
+    try:
+        templates = [
+            name for name in os.listdir(OBJECTS_DIR)
+            if os.path.isdir(os.path.join(OBJECTS_DIR, name))
+               and os.path.isfile(os.path.join(OBJECTS_DIR, name, "definition.json"))
+        ]
+        template_whitelist = get_misp_object_template_whitelist()
+        if template_whitelist:
+            templates = [t for t in templates if t in template_whitelist]
+        return templates
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
