@@ -1,9 +1,8 @@
-from fastapi import Request, FastAPI, Query
+from fastapi import Request, FastAPI, Query, Body, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pymisp import MISPEvent
-from typing import Optional
+from typing import Optional, Literal
 from settings import misp_config, redis_config, abracadabra_config
 import logging
 import json
@@ -215,27 +214,46 @@ async def post_objects():
 async def post_objects(token: str):
     return {"token": token, "status": "ok"}
 
-@app.get("/retrieve/{token}")
-async def retrieve_event(
-    token: str,
-    format: str = Query("json", enum=["json", "csv", "suricata", "text", "stix", "stix2"])
-):
+async def _retrieve_event_by_token(token: str, format: str = "json"):
     uuid = token_to_uuid(token)
     if not uuid:
-        return {"error": "Could not retieve the token."}
+        raise HTTPException(status_code=404, detail="Could not retrieve the token.")
+
     pymisp = get_misp()
-    if not format:
-        format = "json"
     r = pymisp.search(
         controller='events',
-        eventid = uuid,
+        eventid=uuid,
         return_format=format,
         includeAnalystData=True
     )
-    if format == "json" or format == "stix2":
+
+    if format in ["json", "stix2"]:
         return JSONResponse(content=r)
     else:
         return PlainTextResponse(content=r)
+
+
+# GET version (token in path, format in query)
+@app.get("/retrieve/{token}")
+async def retrieve_event_get(
+    token: str,
+    format: Literal["json", "csv", "suricata", "text", "stix", "stix2"] = Query("json")
+):
+    return await _retrieve_event_by_token(token, format)
+
+
+# POST version (token and format in request body)
+@app.post("/retrieve")
+async def retrieve_event_post(
+    body: dict = Body(..., example={"token": "abc123", "format": "json"})
+):
+    token = body.get("token")
+    format = body.get("format", "json")
+
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing token in request body.")
+    
+    return await _retrieve_event_by_token(token, format)
     
 @app.get("/timestamp/{token}")
 async def retrieve_last_update_timestamp(
