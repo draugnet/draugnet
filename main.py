@@ -69,15 +69,22 @@ async def share_misp_event(request: Request) -> JSONResponse:
     if not is_authorised():
         raise HTTPException(status_code=403, detail="Not authorized.")
     data = await request.body()
-
+    data = json.loads(data)
     event = MISPEvent()
-    event.from_json(data)
+    if "event" not in data:
+        event.from_dict(data["event"])
+    else:
+        event.from_dict(data)
+
+    if data.get("optional"):
+        event = add_optional_form_data(event, data["optional"])
 
     saved_event = pymisp.add_event(event)
+
     if isinstance(saved_event, dict) and "errors" in saved_event:
         logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
         raise HTTPException(status_code=500, detail="Could not save event to MISP.")
-    
+
     token = generate_token()
     if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
         raise HTTPException(status_code=500, detail="Could not store token.")
@@ -109,21 +116,30 @@ async def update_misp_event(token: str, request: Request):
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 @app.post("/share/raw")
-async def post_raw(request: Request):
+async def post_raw(request: Request) -> JSONResponse:
     pymisp = get_misp()
     redis = get_redis()
     if not pymisp or not redis:
         raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
     if not is_authorised():
         raise HTTPException(status_code=403, detail="Not authorized.")
+    
+    data = await request.body()
+    data = json.loads(data)
 
-    raw_text = await request.body()
-    raw_text_str = raw_text.decode("utf-8").strip()
+    if "text" not in data:
+        raise HTTPException(status_code=400, detail="Missing 'text' field in request body.")
+    
+    raw_text_str = data.get("text")
 
     if not raw_text_str:
         raise HTTPException(status_code=400, detail="Empty report body.")
 
-    saved_event = create_misp_event(pymisp, logger)
+    event = create_misp_event()
+    if data.get("optional"):
+        event = add_optional_form_data(event, data["optional"])
+    saved_event = save_misp_event(event, pymisp, logger)
+
 
     if isinstance(saved_event, dict) and "errors" in saved_event:
         logger.error(f"Error creating event: {json.dumps(saved_event['errors'])}")
