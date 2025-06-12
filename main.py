@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pymisp import MISPEvent
 from typing import Optional, Literal
-from settings import misp_config, redis_config, abracadabra_config
+from config.settings import misp_config, redis_config, abracadabra_config, allowed_origins
 import logging
 import json
 import os
@@ -14,17 +14,10 @@ app = FastAPI()
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
 
-# List all allowed frontend origins here
-origins = [
-    "http://localhost:8998",  # Frontend origin
-    "http://localhost:8999",  # Backend if accessed via browser (optional)
-    # Add any deployed URLs if needed
-    "http://localhost:5007"
-]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Could also be ["*"] for all, but it's more secure to specify
+    allow_origins=allowed_origins,  # Could also be ["*"] for all, but it's more secure to specify
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

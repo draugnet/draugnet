@@ -2,7 +2,7 @@ from redis import Redis
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pymisp import PyMISP, MISPEvent, MISPEventReport
 from fastapi import HTTPException
-from settings import misp_config, redis_config, abracadabra_config
+from config.settings import misp_config, redis_config, abracadabra_config
 import random
 import string
 import re
@@ -156,8 +156,8 @@ def add_optional_form_data(event: MISPEvent, options: dict):
     if "description" in options.keys() and options["description"].strip():
         event.add_event_report("Additional report description", options["description"])
 
-    logger.info(options["submitter"])
     if "submitter" in options.keys() and options["submitter"].strip():
+        logger.info(options["submitter"])
         event.add_tag("submitter:" + options["submitter"].strip())
 
     return event
