@@ -1,5 +1,7 @@
 ## Draugnet
 
+<img title="Draugnet logo" src="https://github.com/draugnet/draugnetUI/raw/main/webroot/img/logo_vertical_dark_800.png" width="300" height="300">
+
 The light-weight community submission tool for cyber-threat information.
 
 ### How it works
@@ -25,7 +27,9 @@ In fact, Draugnet supports fully anonymous submissions of data this way. Draugne
 
 ### Installation
 
-The installation is extremely straight forward, an example given for Ubuntu below:
+If you wish to install draugnet via docker, head over to the [draugnet-docker repo](https://github.com/draugnet/draugnet-docker)
+
+The native installation is extremely straight forward, an example given for Ubuntu below:
 
 ```
 sudo apt install redis python3 python3-venv
@@ -33,7 +37,7 @@ git clone https://github.com/draugnet/draugnet
 cd draugnet
 python3 -m venv ./venv
 source .venv/bin/activate
-pip install -r requirements
+pip install -r requirements.txt
 mv config/settings.default.py config/settings.py
 ```
 
@@ -42,6 +46,8 @@ mv config/settings.default.py config/settings.py
 Edit the settings file that is now found at `{draugnet_path}/config/settings.py` and provide draugnet with connection details of your misp instance. Make sure that you use a non privileged user for this (such as a publisher user). It is highly recommended to create or pick a role that has `tag_editor` permissions in MISP.
 
 In the `allowed_origins` setting, add the url through which draugnet is to be reached and if you wish to run draugnet's frontent (draugnetUI), make sure tou add the URL of your draugnetUI server too to the list of whitelisted origins. 
+
+If you want draugnet to run on https (and why wouldn't you?) - simply pass the path to the cert and key files in the draugnet_config section.
 
 For the insteallation of draugnetUI, head over to the [draugnetUI repo](https://github.com/draugnet/draugnetUI)
 
@@ -52,3 +58,13 @@ To launch draugnet, simply run (assuming you have the venv enabled):
 
 To launch draugnet in developer mode (assuming you have the venv enabled):
 `fastapi dev main.py`
+
+### Updating draugnet
+
+Updating draugnet is very straight forward (assuming you have the venv enabled).
+```
+cd /path/to/your/draugnet
+git pull origin main
+git submodule update --init --recursive
+pip install --upgrade -r requirements.txt
+```
