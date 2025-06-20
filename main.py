@@ -12,7 +12,6 @@ import uvicorn
 
 from utils import *
 
-app = FastAPI()
 if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(draugnet_config.get("ssl_cert_path"), keyfile=draugnet_config.get("ssl_key_path"))
@@ -20,6 +19,8 @@ if draugnet_config.get("port"):
     port = draugnet_config.get("port")
 else:
     port = 8999
+    
+app = FastAPI()
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
 
@@ -294,17 +295,22 @@ async def post_objects(request: Request, token: str) -> JSONResponse:
         if temp_data['data'][key] is not None and temp_data['data'][key] != "" and temp_data['data'][key] != [] and temp_data['data'][key] != 'undefined':
             data[key] = temp_data['data'][key]
 
-    event = create_misp_event()
-    if optional:
-        event = add_optional_form_data(event, optional)
+    uuid = token_to_uuid(token)
+    event = pymisp.get_event(uuid)
+
+    if isinstance(event, dict) and "errors" in event:
+        logger.error(f"Error getting event: {json.dumps(event['errors'])}")
+        raise HTTPException(status_code=403, detail="Invalid MISP event or no access.")
+
+    event_uuid = event["Event"]["uuid"]
     
     misp_object = create_misp_object(pymisp, template_name, data)
     event.add_object(misp_object)
-    saved_event = pymisp.add_event(event)
+    saved_event = pymisp.update_event(event)
 
     if isinstance(saved_event, dict) and "errors" in saved_event:
         logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
-        raise HTTPException(status_code=500, detail="Could not save event to MISP.")
+        raise HTTPException(status_code=500, detail="Could not save updates to the event in MISP.")
 
     token = generate_token()
     if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
@@ -402,7 +408,10 @@ async def get_object_template(
     
 
 if __name__ == "__main__":
+    if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
+        ssl_key_path = draugnet_config.get("ssl_key_path")
+        ssl_certfile = draugnet_config.get("ssl_cert_path")
     try:
-        uvicorn.run("main:app", host="0.0.0.0", port=port, ssl=ssl_context)
+        uvicorn.run("main:app", host="0.0.0.0", port=port, ssl_keyfile=ssl_key_path, ssl_certfile=ssl_certfile)
     except NameError:
         uvicorn.run("main:app", host="0.0.0.0", port=port)
