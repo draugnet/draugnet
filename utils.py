@@ -1,6 +1,6 @@
 from redis import Redis
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pymisp import PyMISP, MISPEvent, MISPEventReport
+from pymisp import PyMISP, MISPEvent, MISPEventReport, MISPObject
 from fastapi import HTTPException
 from settings import misp_config, redis_config, abracadabra_config
 import random
@@ -156,8 +156,21 @@ def add_optional_form_data(event: MISPEvent, options: dict):
     if "description" in options.keys() and options["description"].strip():
         event.add_event_report("Additional report description", options["description"])
 
-    logger.info(options["submitter"])
     if "submitter" in options.keys() and options["submitter"].strip():
         event.add_tag("submitter:" + options["submitter"].strip())
 
     return event
+
+def create_misp_object(pymisp: PyMISP, template: str, data: dict):
+    try:
+        misp_object = MISPObject(template)
+        for object_relation in data:
+            if isinstance(data[object_relation], str):
+                misp_object.add_attribute(object_relation, value=data[object_relation])
+            else:
+                for value in data[object_relation]:
+                    misp_object.add_attribute(object_relation, value=value)
+        return misp_object
+    except Exception as e:
+        logger.error(f"Error creating MISP object: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not create MISP object.")

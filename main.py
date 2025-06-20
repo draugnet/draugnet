@@ -223,8 +223,52 @@ async def put_raw(token: str, request: Request):
 
 
 @app.post("/share/objects")
-async def post_objects():
-    return {"token": generate_token(), "status": "ok"}
+async def post_objects(request: Request) -> JSONResponse:
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    
+    temp_data = await request.body()
+    temp_data = json.loads(temp_data)
+    data = {}
+    optional = {}
+
+    if "template_name" not in temp_data:
+        raise HTTPException(status_code=400, detail="Missing 'template_name' field in request body.")
+    template_name = temp_data["template_name"]
+
+    if "optional" in temp_data:
+        for key in temp_data['optional']:
+            if temp_data['optional'][key] is not None and temp_data['optional'][key] != "" and temp_data['optional'][key] != [] and temp_data['optional'][key] != 'undefined':
+                if key != 'data':
+                    optional[key] = temp_data['optional'][key]
+
+    for key in temp_data['data']:
+        if temp_data['data'][key] is not None and temp_data['data'][key] != "" and temp_data['data'][key] != [] and temp_data['data'][key] != 'undefined':
+            data[key] = temp_data['data'][key]
+
+    event = create_misp_event()
+    if optional:
+        event = add_optional_form_data(event, optional)
+    
+    misp_object = create_misp_object(pymisp, template_name, data)
+    event.add_object(misp_object)
+    logger.debug(misp_object.to_json())    
+    saved_event = pymisp.add_event(event)
+
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not save event to MISP.")
+
+    token = generate_token()
+    if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
+        raise HTTPException(status_code=500, detail="Could not store token.")
+
+    return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
+
 
 @app.post("/share/objects/{token}")
 async def post_objects(token: str):
