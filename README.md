@@ -25,7 +25,9 @@ In fact, Draugnet supports fully anonymous submissions of data this way. Draugne
 
 ### Installation
 
-The installation is extremely straight forward, an example given for Ubuntu below:
+If you wish to install draugnet via docker, head over to the [draugnet-docker repo](https://github.com/draugnet/draugnet-docker)
+
+The native installation is extremely straight forward, an example given for Ubuntu below:
 
 ```
 sudo apt install redis python3 python3-venv
@@ -33,7 +35,7 @@ git clone https://github.com/draugnet/draugnet
 cd draugnet
 python3 -m venv ./venv
 source .venv/bin/activate
-pip install -r requirements
+pip install -r requirements.txt
 mv config/settings.default.py config/settings.py
 ```
 
@@ -52,3 +54,13 @@ To launch draugnet, simply run (assuming you have the venv enabled):
 
 To launch draugnet in developer mode (assuming you have the venv enabled):
 `fastapi dev main.py`
+
+### Updating draugnet
+
+Updating draugnet is very straight forward (assuming you have the venv enabled).
+```
+cd /path/to/your/draugnet
+git pull origin main
+git submodule update --init --recursive
+pip install --upgrade -r requirements.txt
+```
