@@ -3,14 +3,23 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pymisp import MISPEvent
 from typing import Optional, Literal
-from config.settings import misp_config, redis_config, abracadabra_config, allowed_origins
+from config.settings import misp_config, redis_config, draugnet_config, allowed_origins
 import logging
 import json
 import os
+import ssl
+import uvicorn
 
 from utils import *
 
 app = FastAPI()
+if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(draugnet_config.get("ssl_cert_path"), keyfile=draugnet_config.get("ssl_key_path"))
+if draugnet_config.get("port"):
+    port = draugnet_config.get("port")
+else:
+    port = 8999
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
 
@@ -184,7 +193,8 @@ async def put_raw(token: str, request: Request):
     if not raw_text_str:
         raise HTTPException(status_code=400, detail="Empty report body.")
 
-    event = create_misp_event(pymisp, logger, token)
+    uuid = token_to_uuid(token)
+    event = pymisp.get_event(uuid)
 
     if isinstance(event, dict) and "errors" in event:
         logger.error(f"Error creating event: {json.dumps(event['errors'])}")
@@ -249,7 +259,6 @@ async def post_objects(request: Request) -> JSONResponse:
     
     misp_object = create_misp_object(pymisp, template_name, data)
     event.add_object(misp_object)
-    logger.debug(misp_object.to_json())    
     saved_event = pymisp.add_event(event)
 
     if isinstance(saved_event, dict) and "errors" in saved_event:
@@ -264,8 +273,44 @@ async def post_objects(request: Request) -> JSONResponse:
 
 
 @app.post("/share/objects/{token}")
-async def post_objects(token: str):
-    return {"token": token, "status": "ok"}
+async def post_objects(request: Request, token: str) -> JSONResponse:
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    
+    temp_data = await request.body()
+    temp_data = json.loads(temp_data)
+    data = {}
+    optional = {}
+
+    if "template_name" not in temp_data:
+        raise HTTPException(status_code=400, detail="Missing 'template_name' field in request body.")
+    template_name = temp_data["template_name"]
+
+    for key in temp_data['data']:
+        if temp_data['data'][key] is not None and temp_data['data'][key] != "" and temp_data['data'][key] != [] and temp_data['data'][key] != 'undefined':
+            data[key] = temp_data['data'][key]
+
+    event = create_misp_event()
+    if optional:
+        event = add_optional_form_data(event, optional)
+    
+    misp_object = create_misp_object(pymisp, template_name, data)
+    event.add_object(misp_object)
+    saved_event = pymisp.add_event(event)
+
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not save event to MISP.")
+
+    token = generate_token()
+    if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
+        raise HTTPException(status_code=500, detail="Could not store token.")
+
+    return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 async def _retrieve_event_by_token(token: str, format: str = "json"):
     uuid = token_to_uuid(token)
@@ -354,3 +399,10 @@ async def get_object_template(
         return templates
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
+    
+
+if __name__ == "__main__":
+    try:
+        uvicorn.run("main:app", host="0.0.0.0", port=port, ssl=ssl_context)
+    except NameError:
+        uvicorn.run("main:app", host="0.0.0.0", port=port)

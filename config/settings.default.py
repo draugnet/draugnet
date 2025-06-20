@@ -2,7 +2,7 @@
 misp_config = {
     'url': '',
     'key': '',
-    'verifycert': False
+    'verifycert': True
 }
 
 # redis config
@@ -14,16 +14,18 @@ redis_config = {
 
 # List all allowed frontend origins here
 allowed_origins = [
-#     "http://localhost:8998",  # Frontend origin
-#     "http://localhost:8999",  # Backend if accessed via browser (optional)
+#     "http://localhost:8998",  # Frontend - draugnetUI
+#     "http://localhost:8999",  # Backend - draugnet
 #     # Add any deployed URLs if needed
 #     "http://localhost:5007"
 ]
 
 
-# abracadabra config
-abracadabra_config = {
+# draugnet config
+draugnet_config = {
    "misp_object_templates": [
-
-   ]
+#     add a list of MISP object templates that you want to use - leave empty if you want to use all of them
+   ],
+   "ssl_cert_path": "",
+   "ssl_key_path": ""
 }

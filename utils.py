@@ -2,7 +2,7 @@ from redis import Redis
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pymisp import PyMISP, MISPEvent, MISPEventReport, MISPObject
 from fastapi import HTTPException
-from config.settings import misp_config, redis_config, abracadabra_config
+from config.settings import misp_config, redis_config, draugnet_config
 import random
 import string
 import re
@@ -131,9 +131,9 @@ def get_misp_event(pymisp: PyMISP, logger, uuid:str):
 
 def get_misp_object_template_whitelist():
     # Return a list of allowed misp object templates as defined in the settings file under the "misp_object_templates" list. If it is empty or not defined, return null
-    if not abracadabra_config.get("misp_object_templates"):
+    if not draugnet_config.get("misp_object_templates"):
         return None
-    return abracadabra_config["misp_object_templates"]
+    return draugnet_config["misp_object_templates"]
 
 def add_optional_form_data(event: MISPEvent, options: dict):
     tlp_values = ["tlp:amber", "tlp:green", "tlp:red", "tlp:clear", "tlp:amber+strict", "tlp:unclear"]
