@@ -1,5 +1,7 @@
 ## Draugnet
 
+<img title="Draugnet logo" src="https://github.com/draugnet/draugnetUI/raw/main/webroot/img/logo_vertical_dark_800.png" width="300" height="300">
+
 The light-weight community submission tool for cyber-threat information.
 
 ### How it works
