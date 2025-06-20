@@ -43,7 +43,7 @@ Edit the settings file that is now found at `{draugnet_path}/config/settings.py`
 
 In the `allowed_origins` setting, add the url through which draugnet is to be reached and if you wish to run draugnet's frontent (draugnetUI), make sure tou add the URL of your draugnetUI server too to the list of whitelisted origins. 
 
-For the insteallation of draugnetUI, head over to (https://github.com/draugnet/draugnetUI)[the draugnet UI repo]
+For the insteallation of draugnetUI, head over to the [draugnetUI repo](https://github.com/draugnet/draugnetUI)
 
 ### Launching draugnet
 
