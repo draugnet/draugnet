@@ -12,6 +12,15 @@ redis_config = {
     'db': 5
 }
 
+# List all allowed frontend origins here
+allowed_origins = [
+#     "http://localhost:8998",  # Frontend origin
+#     "http://localhost:8999",  # Backend if accessed via browser (optional)
+#     # Add any deployed URLs if needed
+#     "http://localhost:5007"
+]
+
+
 # abracadabra config
 abracadabra_config = {
    "misp_object_templates": [
