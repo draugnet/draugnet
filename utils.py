@@ -174,3 +174,26 @@ def create_misp_object(pymisp: PyMISP, template: str, data: dict):
     except Exception as e:
         logger.error(f"Error creating MISP object: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not create MISP object.")
+    
+async def retrieve_event_by_token(token: str, format: str = "json"):
+    uuid = token_to_uuid(token)
+    if not uuid:
+        raise HTTPException(status_code=404, detail="Could not retrieve the token.")
+
+    pymisp = get_misp()
+    r = pymisp.search(
+        controller='events',
+        eventid=uuid,
+        return_format=format,
+        includeAnalystData=True,
+        published=[True, False],
+        includeServerCorrelations=False,
+        includeFeedCorrelations=False,
+        includeEventCorrelations=False,
+        includeGranularCorrelations=False
+    )
+
+    if format in ["json", "stix2"]:
+        return JSONResponse(content=r)
+    else:
+        return PlainTextResponse(content=r)

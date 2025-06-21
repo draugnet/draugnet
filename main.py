@@ -243,32 +243,14 @@ async def post_objects(
 
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
-async def _retrieve_event_by_token(token: str, format: str = "json"):
-    uuid = token_to_uuid(token)
-    if not uuid:
-        raise HTTPException(status_code=404, detail="Could not retrieve the token.")
-
-    pymisp = get_misp()
-    r = pymisp.search(
-        controller='events',
-        eventid=uuid,
-        return_format=format,
-        includeAnalystData=True
-    )
-
-    if format in ["json", "stix2"]:
-        return JSONResponse(content=r)
-    else:
-        return PlainTextResponse(content=r)
-
 
 # GET version (token in path, format in query)
-@app.get("/retrieve/{token}")
+@app.get("/retrieve")
 async def retrieve_event_get(
-    token: str,
+    token: str = Query(None, description="Token for retrieving the event"),
     format: Literal["json", "csv", "suricata", "text", "stix", "stix2"] = Query("json")
 ):
-    return await _retrieve_event_by_token(token, format)
+    return await retrieve_event_by_token(token, format)
 
 
 # POST version (token and format in request body)
@@ -282,9 +264,9 @@ async def retrieve_event_post(
     if not token:
         raise HTTPException(status_code=400, detail="Missing token in request body.")
     
-    return await _retrieve_event_by_token(token, format)
+    return await retrieve_event_by_token(token, format)
     
-@app.get("/timestamp/{token}")
+@app.get("/timestamp")
 async def retrieve_last_update_timestamp(
     token: str
 ):
