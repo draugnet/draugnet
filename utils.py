@@ -53,7 +53,6 @@ def store_token_to_uuid(token: str, uuid: str):
     redis = get_redis()
     if not redis:
         return None
-    logger.info("tokens:" + token)
     redis.set("tokens:" + token, uuid)
     touch_token(token)
     return True
