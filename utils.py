@@ -35,7 +35,7 @@ def get_misp():
         pymisp = PyMISP(misp_config['url'], misp_config['key'], misp_config['verifycert'])
         return pymisp
     except:
-        print("Could not connect to redis.")
+        print("Could not connect to MISP.")
         return None
     
     
