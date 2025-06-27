@@ -162,18 +162,21 @@ def add_optional_form_data(event: MISPEvent, options: dict):
     return event
 
 def create_misp_object(pymisp: PyMISP, template: str, data: dict):
+    current_stage = "Creating MISP object"
     try:
         misp_object = MISPObject(template)
         for object_relation in data:
             if isinstance(data[object_relation], str):
+                current_stage = f"Adding attribute {object_relation}: "
                 misp_object.add_attribute(object_relation, value=data[object_relation])
             else:
                 for value in data[object_relation]:
+                    current_stage = f"Adding attribute {object_relation}: "
                     misp_object.add_attribute(object_relation, value=value)
         return misp_object
     except Exception as e:
         logger.error(f"Error creating MISP object: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not create MISP object.")
+        raise HTTPException(status_code=500, detail=f"Object creation failed. {current_stage} - {str(e)}")
     
 async def retrieve_event_by_token(token: str, format: str = "json"):
     uuid = token_to_uuid(token)
