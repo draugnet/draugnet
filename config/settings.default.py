@@ -2,7 +2,23 @@
 misp_config = {
     'url': '',
     'key': '',
-    'verifycert': True
+    'verifycert': True # Set to False if using self-signed certificates or HTTP (but please don't use HTTP in production)
+}
+
+modules_config = {
+    'reporting': {
+        'rtir': {
+            'url': '', # RTIR URL, e.g. https://my.rtir.instance  - don't add the REST/2.0 part
+            'auth_key': '', # authey from RTIR
+            'verifycert': True, # Set to False if using self-signed certificates or HTTP (but please don't use HTTP in production)
+            'queue': 'Draugnet Reports' # Make sure that the queue exists and is writable by the user associated with the auth_key
+        },
+        'flowintel': {
+            'url': '',
+            'auth_key': '',
+            'verifycert': True
+        }
+    }
 }
 
 # redis config
@@ -27,5 +43,6 @@ draugnet_config = {
 #     add a list of MISP object templates that you want to use - leave empty if you want to use all of them
    ],
    "ssl_cert_path": "",
-   "ssl_key_path": ""
+   "ssl_key_path": "",
+   "name": "Draugnet" # Name of the instance, used in various places to identify the source when multiple instances are used
 }
