@@ -1,8 +1,9 @@
+from __future__ import annotations
 from redis import Redis
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pymisp import PyMISP, MISPEvent, MISPEventReport, MISPObject
 from fastapi import HTTPException
-from config.settings import misp_config, redis_config, draugnet_config
+from config.settings import misp_config, redis_config, draugnet_config, modules_config
 import random
 import string
 import re
@@ -11,12 +12,17 @@ import time
 import json
 import logging
 from typing import Optional
+import importlib
+from typing import Any, Dict, Optional, Callable, Awaitable, List
+import asyncio
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OBJECTS_DIR = os.path.join(BASE_DIR, "misp-objects", "objects")
+
+_module_cache: dict[tuple[str, str], Any] = {}
 
 def is_valid_template_name(name: str) -> bool:
     """Allow only alphanumeric characters and dashes."""
@@ -38,7 +44,60 @@ def get_misp():
         print("Could not connect to MISP.")
         return None
     
-    
+
+
+def get_module_config(module_type: str, module_name: str) -> Dict[str, Any]:
+    try:
+        from config.settings import modules_config
+    except ImportError:
+        return {}
+
+    return (modules_config.get(module_type, {}) or {}).get(module_name, {}) or {}
+
+def is_module_enabled(module_type: str, module_name: str) -> bool:
+    cfg = get_module_config(module_type, module_name)
+    if not cfg:
+        return False
+    if "enabled" in cfg:
+        return bool(cfg["enabled"])
+    return bool(cfg.get("url") and cfg.get("auth_key"))
+
+
+def get_module(module_type: str, module_name: str):
+    key = (module_type, module_name)
+    if key in _module_cache:
+        return _module_cache[key]
+
+    if not is_module_enabled(module_type, module_name):
+        return None
+
+    cfg = get_module_config(module_type, module_name)
+    package = f"modules.{module_type}.{module_name}"  # imports the single file
+
+    try:
+        mod = importlib.import_module(package)
+    except Exception as e:
+        logger.exception("Failed to import %s: %s", package, e)
+        return None
+
+    if hasattr(mod, "Module"):
+        try:
+            instance = getattr(mod, "Module")(cfg)
+        except Exception as e:
+            logger.exception("Failed to instantiate %s.Module: %s", package, e)
+            return None
+
+        # We don’t enforce a strict signature—just ensure methods exist
+        for method in ("create_item", "update_item"):
+            if not hasattr(instance, method):
+                logger.error("%s.Module missing required method: %s", package, method)
+                return None
+
+        _module_cache[key] = instance
+        return instance
+
+    logger.error("%s does not export a 'Module' class.", package)
+    return None
 
 def is_authorised():
     # Implement your authorization logic here
@@ -92,9 +151,9 @@ def create_report(raw_text_str: str, event_uuid: Optional[str] = None, event_rep
     event_report.content = raw_text_str
     return event_report
 
-def extract_report_entities(pymisp: PyMISP, event_uuid: str):
+def extract_report_entities(pymisp: PyMISP, report_uuid: str):
     # Extract entities from a report by its ID
-    result = pymisp.direct_call(f"eventReports/extractAllFromReport/{event_uuid}", data="{}")
+    result = pymisp.direct_call(f"eventReports/extractAllFromReport/{report_uuid}", data="{}")
     return result
 
 def create_misp_event():
@@ -110,7 +169,7 @@ def create_misp_event():
 def save_misp_event(event: MISPEvent, pymisp: PyMISP, logger):
     # Save the MISP event
     try:
-        response = pymisp.add_event(event)
+        response = pymisp.add_event(event, pythonify=True)
         if isinstance(response, dict) and "errors" in response:
             logger.error(f"Error saving event: {json.dumps(response['errors'])}")
             raise HTTPException(status_code=500, detail="Could not save MISP event.")
@@ -156,7 +215,6 @@ def add_optional_form_data(event: MISPEvent, options: dict):
         event.add_event_report("Additional report description", options["description"])
 
     if "submitter" in options.keys() and options["submitter"].strip():
-        logger.info(options["submitter"])
         event.add_tag("submitter:" + options["submitter"].strip())
 
     return event
@@ -200,3 +258,40 @@ async def retrieve_event_by_token(token: str, format: str = "json"):
         return JSONResponse(content=r)
     else:
         return PlainTextResponse(content=r)
+    
+def modules_update(context: str, action_type: str, event: Any, token: Optional[str], reports: List[Dict[str, Any]]):
+    try:
+        loop = asyncio.get_running_loop()
+        return loop.create_task(modules_update_async(context, action_type, event, token, reports))
+    except RuntimeError:
+        return asyncio.run(modules_update_async(context, action_type, event, token, reports))
+    
+async def modules_update_async(context: str, action_type: str, event: Any, token: Optional[str], reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    from config.settings import modules_config
+
+    redis = get_redis()
+    reporting_cfg: Dict[str, Dict[str, Any]] = (modules_config.get("reporting") or {})
+
+    results: List[Dict[str, Any]] = []
+
+    for mod_name in reporting_cfg.keys():
+        if not is_module_enabled("reporting", mod_name):
+            continue
+
+        mod = get_module("reporting", mod_name)
+        if not mod:
+            results.append({mod_name: {"ok": False, "error": "module load failed"}})
+            continue
+
+        if action_type == "modify" and token:
+            external_id = redis.get("modules:" + mod_name + ":token:" + token)
+            mod_result = await mod.update_item(context, redis, external_id, event, reports)
+        else:
+            mod_result = await mod.create_item(context, redis, token, event, reports)
+
+        if mod_result:
+            results.append({mod_name: {"ok": True}})
+        else:
+            results.append({mod_name: {"ok": False, "error": "module save failed"}})
+
+    return results

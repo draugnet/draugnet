@@ -99,14 +99,18 @@ async def share_misp_event(
     if isinstance(saved_event, dict) and "errors" in saved_event:
         logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
         raise HTTPException(status_code=500, detail="Could not save event to MISP.")
-
+    
+    action_type = 'create'
     if token:
+        action_type = 'modify'
         touch_token(token)
     else:
         token = generate_token()
         if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
             raise HTTPException(status_code=500, detail="Could not store token.")
-
+        
+    context = 'MISP event upload'
+    modules_update(context, action_type, event, token, [])
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 @app.post("/share/raw")
@@ -123,6 +127,7 @@ async def post_raw(
     
     data = await request.body()
     data = json.loads(data)
+    context = f'freetext input'
 
     if "text" not in data:
         raise HTTPException(status_code=400, detail="Missing 'text' field in request body.")
@@ -136,7 +141,12 @@ async def post_raw(
         uuid = token_to_uuid(token)
         if not uuid:
             raise HTTPException(status_code=404, detail="Invalid token.")
-        saved_event = pymisp.get_event(uuid)
+        event = pymisp.get_event(uuid, pythonify=True)
+        if data.get("optional"):
+            event = add_optional_form_data(event, data["optional"])
+            saved_event = pymisp.update_event(event, event_id=uuid, pythonify=True)
+        else:
+            saved_event = event
         if isinstance(saved_event, dict) and "errors" in saved_event:
             logger.error(f"Error getting event: {json.dumps(saved_event['errors'])}")
             raise HTTPException(status_code=403, detail="Invalid MISP event or no access.")
@@ -149,8 +159,8 @@ async def post_raw(
             logger.error(f"Error creating event: {json.dumps(saved_event['errors'])}")
             raise HTTPException(status_code=500, detail="Could not create MISP event.")
 
-    event_uuid = saved_event["Event"]["uuid"]
-    event_report = create_report(raw_text_str, event_uuid)
+    event_uuid = saved_event.get("uuid")
+    event_report = create_report(raw_text_str, event_uuid, "Raw freetext input")
     try:
         response = pymisp.add_event_report(event_uuid, event_report)
         if isinstance(response, dict) and "errors" in response:
@@ -168,14 +178,16 @@ async def post_raw(
     except Exception as e:
         logger.exception("Exception while extracting entities from report.")
         raise HTTPException(status_code=500, detail=str(e))
-    
+    action_type = 'create'
     if token:
+        action_type = 'modify'
         touch_token(token)
+        event = pymisp.get_event(uuid, pythonify=True)
     else:
         token = generate_token()
         if not store_token_to_uuid(token, event_uuid):
             raise HTTPException(status_code=500, detail="Could not store token.")
-
+    modules_update(context, action_type, event, token, [event_report])
     return {"token": token, "event_uuid": event_uuid, "status": "ok"}
 
 @app.post("/share/objects")
@@ -198,6 +210,7 @@ async def post_objects(
     if "template_name" not in temp_data:
         raise HTTPException(status_code=400, detail="Missing 'template_name' field in request body.")
     template_name = temp_data["template_name"]
+    context = f'object template ({template_name})'
 
     if not token:
         if "optional" in temp_data:
@@ -234,13 +247,17 @@ async def post_objects(
         logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
         raise HTTPException(status_code=500, detail="Could not save event to MISP.")
 
+    action_type = 'create'
     if token:
+        action_type = 'modify'
         touch_token(token)
     else:
         token = generate_token()
         if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
             raise HTTPException(status_code=500, detail="Could not store token.")
 
+    modules_update(context, action_type, event, token, [])
+    
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 
@@ -312,7 +329,6 @@ async def get_object_template(
         return templates
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
-    
 
 if __name__ == "__main__":
     if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
