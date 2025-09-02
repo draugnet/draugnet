@@ -52,7 +52,6 @@ class Module:
         with httpx.Client(timeout=timeout) as client:
             logger.info(f"Posting to Ollama at {url} with payload: {json.dumps(payload)}")
             r = client.post(url, json=payload)
-            logger.debug(f"Ollama response status: {r.status_code} with message: {r.text}")
             r.raise_for_status()
             return r.json()
         
