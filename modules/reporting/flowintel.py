@@ -1,10 +1,12 @@
-# modules/reporting/rtir.py
+# modules/reporting/flowintel.py
 from __future__ import annotations
 from typing import Any, Dict, Optional, List
 import httpx
+import json
 from redis import Redis
 import logging
 from config.settings import misp_config
+from datetime import datetime
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
@@ -14,10 +16,9 @@ class Module:
         self.cfg = config or {}
         self.base_url = (self.cfg.get("url") or "").rstrip("/")
         self.verify = bool(self.cfg.get("verifycert", True))
-        self.queue = self.cfg.get("queue", '')
         self.headers = {
-            "Content-Type": "application/json",
-            #"Authorization": f"token {self.cfg.get("auth_key", '')}",
+            "X-API-KEY": self.cfg.get("auth_key", ''),
+            "Content-Type": "application/json"
         }
         self.misp_url = misp_config.get("url", "").rstrip("/")
 
@@ -28,57 +29,63 @@ class Module:
             if tag.get("name", "").startswith("submitter:"):
                 submitter = tag.get("name", "").split("submitter:")[-1]
             else:
-                tags.append(tag.get("name", ""))
+                name = tag.get("name", "")
+                tag_parts = name.split(":")
+                if tag_parts[0] == "PAP" or tag_parts[0] == "tlp":
+                    tags.append(tag.get("name", ""))
+
         event_reports = []
         for report in reports:
             event_reports.append(f"{report.get('name', '')}\n-------------------------------------------------\n\n{report.get('content', '')}")
         for report in event.get("EventReport", []):
             event_reports.append(f"{report.get('name', '')}\n-------------------------------------------------\n\n{report.get('content', '')}")
+        description = f'''A new Draugnet report has been posted. Please check the MISP instance for more details.
+
+**Submission type**: {context}
         
-        logger.info(f"Creating RTIR ticket for event {event.get('uuid', '')}")
-        url = f"{self.base_url}/REST/2.0/ticket?token={self.cfg.get("auth_key", '')}"
-        subject = f"[{self.cfg.get("name", "Draugnet")}] {event.get("info", "Draugnet Report")}"
-        if enhanced_text:
-            enhanced_text = f"\n{enhanced_text}\n"
-        else:
-            enhanced_text = ""
-        content = f'''A new Draugnet report has been posted. Please check the MISP instance for more details.
+**Submitted by**: {submitter}
+
+**MISP Event UUID**: {event.get("uuid", "")}
         
-        Submission type: {context}
-
-        Submitted by: {submitter}
-
-        MISP Event UUID: {event.get("uuid", "")}
-        
-        MISP URL: {self.misp_url}/events/view/{event.get("uuid", "")}
-
-        Tags: {", ".join(tags) if tags else "None"}
-        {enhanced_text}
-        Reports: 
-
-        =================================================
-        {"\n\n=================================================\n\n ".join(event_reports) if tags else "None"}
-
-        =================================================
-
-
+**MISP URL**: {self.misp_url}/events/view/{event.get("uuid", "")}
         '''
+        if enhanced_text:
+            description += f"\n\n{enhanced_text}\n"
+        subject = f"[{self.cfg.get("name", "Draugnet")}] {event.get("info", "Draugnet Report")}"
+        notes = "\n=================================================\n\n ".join(event_reports)
+        case = {
+            'title': subject + datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'description': description,
+            'is_private': False,
+            'tags': tags,
+            # "clusters": [],
+        }
+        
+        logger.info(f"Creating Flowintel case for event {event.get('uuid', '')}")
+        url = f"{self.base_url}/api/case/create"
+        payload: Dict[str, Any] = case
 
-        payload: Dict[str, Any] = {'Queue': self.queue, 'Subject': subject, 'Content': content}
-    
+
         async with httpx.AsyncClient(verify=self.verify, timeout=30) as client:
             resp = await client.post(url, headers=self.headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            ticketId = str(data.get("id") or data.get("TicketId") or "")
-            redis.set("modules:rtir:token:" + token, ticketId)
-            redis.set("modules:rtir:external_id:" + ticketId, token)
-            return True
+            caseId = str(data.get("case_id"))
+            redis.set("modules:flowintel:token:" + token, caseId)
+            redis.set("modules:flowintel:external_id:" + caseId, token)
+            # Add notes to the case
+            if notes:
+                note_url = f"{self.base_url}/api/case/{caseId}/modif_case_note"
+                note_payload = {
+                    'note': notes
+                }
+                note_resp = await client.post(note_url, headers=self.headers, json=note_payload)
+                note_resp.raise_for_status()
 
     async def update_item(self, context: str, redis: Redis, external_id: str, event, reports: List[Dict[str, Any]], enhanced_text: Optional[str] = None) -> Dict[str, Any]:
         if not external_id:
             return {"ok": False, "error": "Missing external_id"}
-        url = f"{self.base_url}/REST/2.0/ticket/{str(external_id, 'utf-8')}/comment?token={self.cfg.get("auth_key", '')}"
+        url = f"{self.base_url}/api/case/{str(external_id, 'utf-8')}/modif_case_note"
         submitter = "unknown"
         tags = []
         for tag in event.get("Tag", []):
@@ -88,34 +95,35 @@ class Module:
                 tags.append(tag.get("name", ""))
         event_reports = []
         for report in reports:
-            event_reports.append(f"{report.get('name', '')}\n-------------------------------------------------\n\n{report.get('content', '')}")
+            event_reports.append(f"**{report.get('name', '')}**\n\n{report.get('content', '')}")
         for report in event.get("EventReport", []):
-            event_reports.append(f"{report.get('name', '')}\n-------------------------------------------------\n\n{report.get('content', '')}")
+            event_reports.append(f"**{report.get('name', '')}**\n\n{report.get('content', '')}")
         
         content = f'''The report has been updated via Draugnet:
 
-        Submission type: {context}
+**Submission type**: {context}
         
-        Submitted by: {submitter}
+**Submitted by**: {submitter}
 
-        MISP Event UUID: {event.get("uuid", "")}
+**MISP Event UUID**: {event.get("uuid", "")}
         
-        MISP URL: {self.misp_url}/events/view/{event.get("uuid", "")}
+**MISP URL**: {self.misp_url}/events/view/{event.get("uuid", "")}
+        {f"\n{enhanced_text}\n" if enhanced_text else ""}
+**Tags**: {", ".join(tags) if tags else "None"}
 
-        Tags: {", ".join(tags) if tags else "None"}
+**Reports**: 
 
-        Reports: 
+{"\n\n=================================================\n\n ".join(event_reports) if event_reports else "None"}
 
-        =================================================
-        {"\n\n=================================================\n\n ".join(event_reports) if tags else "None"}
-
-        =================================================
+=================================================
 
         '''
-        payload: Dict[str, Any] = {"Content": content, "ContentType": "text/plain"}
+        note_payload = {
+            'note': content
+        }
 
         async with httpx.AsyncClient(verify=self.verify, timeout=30) as client:
-            resp = await client.post(url, headers=self.headers, json=payload)
+            resp = await client.post(url, headers=self.headers, json=note_payload)
             resp.raise_for_status()
             data = resp.json()
             return {"ok": True, "external_id": external_id, "raw": data}

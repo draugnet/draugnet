@@ -8,15 +8,29 @@ misp_config = {
 modules_config = {
     'reporting': {
         'rtir': {
-            'url': '', # RTIR URL, e.g. https://my.rtir.instance  - don't add the REST/2.0 part
-            'auth_key': '', # authey from RTIR
-            'verifycert': True, # Set to False if using self-signed certificates or HTTP (but please don't use HTTP in production)
-            'queue': 'Draugnet Reports' # Make sure that the queue exists and is writable by the user associated with the auth_key
+            # 'url': '', # RTIR URL, e.g. https://my.rtir.instance  - don't add the REST/2.0 part
+            # 'auth_key': '', # authey from RTIR
+            # 'verifycert': True, # Set to False if using self-signed certificates or HTTP (but please don't use HTTP in production)
+            # 'queue': 'Draugnet Reports' # Make sure that the queue exists and is writable by the user associated with the auth_key
         },
         'flowintel': {
-            'url': '',
-            'auth_key': '',
-            'verifycert': True
+            # 'url': '',
+            # 'auth_key': '',
+            # 'verifycert': True
+        }
+    },
+    "enhancements": {
+        "ollama": {
+            # "enabled": True,
+            # "url": "http://path_to_ollama_server:11434",
+            # "model": "model_name",
+            # "timeout": 120,
+            # "temperature": 0.2,
+            # "max_tokens": 800,
+            #"language": "en", # default output language
+            #"style": "concise_risk_intel", # see PROMPT_STYLES below
+            # "title_template": "Summary for: ${submission_title}",
+            # "prompt_overrides": {}
         }
     }
 }
