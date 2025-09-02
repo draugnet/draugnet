@@ -12,11 +12,11 @@ class ReportingModule(ABC):
         self.config = config or {}
 
     @abstractmethod
-    async def create_item(self, *, context: str, redis: Redis, external_id: str, event: Any, reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def create_item(self, *, context: str, redis: Redis, external_id: str, event: Any, reports: List[Dict[str, Any]], enhanced_text: Optional[str] = None) -> Dict[str, Any]:
         """Create a new report/ticket/record in the external system."""
         ...
 
     @abstractmethod
-    async def update_item(self, *,  context: str, redis: Redis, token:str, event: Any, reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def update_item(self, *,  context: str, redis: Redis, token:str, event: Any, reports: List[Dict[str, Any]], enhanced_text: Optional[str] = None) -> Dict[str, Any]:
         """Append content / update an existing record in the external system."""
         ...

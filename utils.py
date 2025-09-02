@@ -87,8 +87,13 @@ def get_module(module_type: str, module_name: str):
             logger.exception("Failed to instantiate %s.Module: %s", package, e)
             return None
 
+        required_methods = {
+            "reporting": ["create_item", "update_item"],
+            "enhancements": ["run"]
+        }
+
         # We don’t enforce a strict signature—just ensure methods exist
-        for method in ("create_item", "update_item"):
+        for method in required_methods[module_type]:
             if not hasattr(instance, method):
                 logger.error("%s.Module missing required method: %s", package, method)
                 return None
@@ -259,14 +264,14 @@ async def retrieve_event_by_token(token: str, format: str = "json"):
     else:
         return PlainTextResponse(content=r)
     
-def modules_update(context: str, action_type: str, event: Any, token: Optional[str], reports: List[Dict[str, Any]]):
+def modules_update(context: str, action_type: str, event: Any, token: Optional[str], reports: List[Dict[str, Any]], enhanced_text: Optional[str] = None):
     try:
         loop = asyncio.get_running_loop()
-        return loop.create_task(modules_update_async(context, action_type, event, token, reports))
+        return loop.create_task(modules_update_async(context, action_type, event, token, reports, enhanced_text))
     except RuntimeError:
-        return asyncio.run(modules_update_async(context, action_type, event, token, reports))
+        return asyncio.run(modules_update_async(context, action_type, event, token, reports, enhanced_text))
     
-async def modules_update_async(context: str, action_type: str, event: Any, token: Optional[str], reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+async def modules_update_async(context: str, action_type: str, event: Any, token: Optional[str], reports: List[Dict[str, Any]], enhanced_text: Optional[str] = None) -> List[Dict[str, Any]]:
     from config.settings import modules_config
 
     redis = get_redis()
@@ -275,6 +280,7 @@ async def modules_update_async(context: str, action_type: str, event: Any, token
     results: List[Dict[str, Any]] = []
 
     for mod_name in reporting_cfg.keys():
+        logger.debug(f"Processing module: {mod_name}")
         if not is_module_enabled("reporting", mod_name):
             continue
 
@@ -285,9 +291,9 @@ async def modules_update_async(context: str, action_type: str, event: Any, token
 
         if action_type == "modify" and token:
             external_id = redis.get("modules:" + mod_name + ":token:" + token)
-            mod_result = await mod.update_item(context, redis, external_id, event, reports)
+            mod_result = await mod.update_item(context, redis, external_id, event, reports, enhanced_text)
         else:
-            mod_result = await mod.create_item(context, redis, token, event, reports)
+            mod_result = await mod.create_item(context, redis, token, event, reports, enhanced_text)
 
         if mod_result:
             results.append({mod_name: {"ok": True}})
@@ -295,3 +301,33 @@ async def modules_update_async(context: str, action_type: str, event: Any, token
             results.append({mod_name: {"ok": False, "error": "module save failed"}})
 
     return results
+
+
+def modules_enhance(action_type: str, context: str, data: Any) -> List[Dict[str, Any]]:
+    from config.settings import modules_config  # local import to avoid circulars
+
+    _ = get_redis()  # reserved for future use; no interpretation here
+    enh_cfg: Dict[str, Dict[str, Any]] = (modules_config.get("enhancements") or {})
+    results: List[Dict[str, Any]] = []
+
+    for mod_name in enh_cfg.keys():
+        logger.info("Processing enhancement module: %s", mod_name)
+        if not is_module_enabled("enhancements", mod_name):
+            continue
+
+        mod = get_module("enhancements", mod_name)
+        if not mod:
+            logger.error("{mod_name}: module load failed")
+            continue
+
+        run_fn = getattr(mod, "run", None)
+        if run_fn is None:
+            logger.error("{mod_name}: module has no run()")
+            continue
+
+        try:
+            data = run_fn(action_type, context, data)
+        except Exception as e:
+            logger.exception("Enhancement module %s failed", mod_name)
+
+    return data

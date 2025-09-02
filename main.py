@@ -77,6 +77,9 @@ async def share_misp_event(
 
     data = await request.body()
     data = json.loads(data)
+    options = []
+    if data.get("optional"):
+        options = data["optional"]
     event = MISPEvent()
     if "event" in data:
         data = data["event"]
@@ -84,8 +87,8 @@ async def share_misp_event(
         data = data["Event"]
     event.from_dict(**data)
 
-    if data.get("optional"):
-        event = add_optional_form_data(event, data["optional"])
+    if options:
+        event = add_optional_form_data(event, options)
 
     if token:
         uuid = token_to_uuid(token)
@@ -109,8 +112,9 @@ async def share_misp_event(
         if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
             raise HTTPException(status_code=500, detail="Could not store token.")
         
-    context = 'MISP event upload'
-    modules_update(context, action_type, event, token, [])
+    context = 'misp'
+    enhanced_text = modules_enhance(action_type, context, data)
+    modules_update(context, action_type, event, token, [], enhanced_text)
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 @app.post("/share/raw")
@@ -127,7 +131,7 @@ async def post_raw(
     
     data = await request.body()
     data = json.loads(data)
-    context = f'freetext input'
+    context = 'freetext'
 
     if "text" not in data:
         raise HTTPException(status_code=400, detail="Missing 'text' field in request body.")
@@ -170,7 +174,6 @@ async def post_raw(
         logger.exception("Exception while adding event report.")
         raise HTTPException(status_code=500, detail=str(e))
     report_uuid = response["EventReport"]["uuid"]
-
     try:
         result = extract_report_entities(pymisp, report_uuid)
         if isinstance(result, dict) and "errors" in result:
@@ -187,7 +190,8 @@ async def post_raw(
         token = generate_token()
         if not store_token_to_uuid(token, event_uuid):
             raise HTTPException(status_code=500, detail="Could not store token.")
-    modules_update(context, action_type, event, token, [event_report])
+    enhanced_text = modules_enhance(action_type, context, raw_text_str)
+    modules_update(context, action_type, event, token, [event_report], enhanced_text)
     return {"token": token, "event_uuid": event_uuid, "status": "ok"}
 
 @app.post("/share/objects")
@@ -255,7 +259,8 @@ async def post_objects(
         token = generate_token()
         if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
             raise HTTPException(status_code=500, detail="Could not store token.")
-
+        
+    enhanced_text = modules_enhance(action_type, context, saved_event)
     modules_update(context, action_type, event, token, [])
     
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
