@@ -56,7 +56,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get -y update
-          sudo apt-get -y install curl apache2 libapache2-mod-php8.3
+          sudo apt-get -y install curl apache2 libapache2-mod-php8.3 python3-virtualenv
 
       - name: Install MISP
         run: |
@@ -112,6 +112,19 @@ jobs:
           sudo chmod +x /home
           sudo chmod +x /
 
+      # MISP uses its own Python venv for server-side STIX import/export.
+      # Without misp-stix installed and MISP.python_bin pointing at it,
+      # /events/upload_stix/2 and return_format=stix2 both return errors.
+      - name: Setup MISP Python environment
+        run: |
+          python3 -m virtualenv -p python3 misp/venv
+          pushd misp
+          . venv/bin/activate
+          export PYTHONPATH=$PYTHONPATH:./app/files/scripts
+          pip install -r requirements.txt
+          deactivate
+          popd
+
       - name: Configure MISP
         run: |
           pushd misp
@@ -136,6 +149,7 @@ jobs:
           app/Console/cake Admin setSetting "MISP.redis_database" 13
           app/Console/cake Admin setSetting "MISP.redis_password" ""
           app/Console/cake Admin setSetting "SimpleBackgroundJobs.enabled" 0
+          app/Console/cake Admin setSetting "MISP.python_bin" "$GITHUB_WORKSPACE/misp/venv/bin/python"
           app/Console/cake Admin live 1
           popd
 
