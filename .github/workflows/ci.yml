@@ -118,6 +118,12 @@ jobs:
           app/Console/cake Admin setSetting "MISP.server_settings_skip_backup_rotate" 1
           app/Console/cake Admin setSetting "MISP.osuser" "$USER"
           app/Console/cake Admin runUpdates
+
+          # Init creates the default organisation (ID 1) and admin user — must
+          # run before any setting that validates against the org table.
+          app/Console/cake User init | tee /tmp/misp_auth.txt
+          echo "AUTH=$(cat /tmp/misp_auth.txt)" >> $GITHUB_ENV
+
           app/Console/cake Admin setSetting "Session.autoRegenerate" 0
           app/Console/cake Admin setSetting "Session.timeout" 600
           app/Console/cake Admin setSetting "Session.cookieTimeout" 3600
@@ -130,11 +136,6 @@ jobs:
           app/Console/cake Admin setSetting "MISP.redis_database" 13
           app/Console/cake Admin setSetting "MISP.redis_password" ""
           app/Console/cake Admin setSetting "SimpleBackgroundJobs.enabled" 0
-
-          # Generate admin API key and export for subsequent steps
-          app/Console/cake User init | tee /tmp/misp_auth.txt
-          echo "AUTH=$(cat /tmp/misp_auth.txt)" >> $GITHUB_ENV
-
           app/Console/cake Admin live 1
           popd
 
