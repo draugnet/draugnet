@@ -10,6 +10,8 @@ import os
 import ssl
 import uvicorn
 import httpx
+import csv
+import io
 
 from utils import *
 
@@ -34,13 +36,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MAX_REQUEST_BODY = 50 * 1024 * 1024  # 50 MB
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY:
+                return JSONResponse({"detail": "Request body too large."}, status_code=413)
+        except ValueError:
+            pass
+    return await call_next(request)
+
 
 @app.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {
+        "name": "Draugnet",
+        "description": "Threat intelligence submission API — accepts indicators in multiple formats and ingests them into MISP.",
+        "docs": "/docs",
+        "endpoints": {
+            "submission_formats": "/share",
+            "view_report":        "/view/{token}",
+            "sharing_groups":     "/sharing_groups",
+        },
+    }
 
 @app.get("/share")
-async def root():
+async def get_share_formats():
     return {
         "formats": {
             "misp": {
@@ -65,6 +89,12 @@ async def root():
                 "name": "STIX",
                 "description": "STIX 2.0/2.1 bundle",
                 "url": "/share/stix",
+                "method": "POST"
+            },
+            "csv": {
+                "name": "CSV",
+                "description": "CSV with columns: category, type, value, first_seen, last_seen, comment (type and value required)",
+                "url": "/share/csv",
                 "method": "POST"
             }
         }
@@ -179,7 +209,7 @@ async def post_raw(
             raise HTTPException(status_code=500, detail="Could not attach event report.")
     except Exception as e:
         logger.exception("Exception while adding event report.")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not attach event report.")
     report_uuid = response["EventReport"]["uuid"]
     try:
         result = extract_report_entities(pymisp, report_uuid)
@@ -187,7 +217,7 @@ async def post_raw(
             raise HTTPException(status_code=500, detail="Could not extract entities from report.")
     except Exception as e:
         logger.exception("Exception while extracting entities from report.")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not extract entities from report.")
     action_type = 'create'
     if token:
         action_type = 'modify'
@@ -271,6 +301,98 @@ async def post_objects(
     modules_update(context, action_type, event, token, [])
     
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
+
+@app.post("/share/csv")
+async def share_csv(
+    request: Request,
+    token: Optional[str] = Query(None, description="Optional access token for editing an existing report")
+) -> JSONResponse:
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    body = await request.body()
+    body = json.loads(body)
+    options = body.get("optional", {})
+    csv_data = body.get("csv")
+
+    if not csv_data:
+        raise HTTPException(status_code=400, detail="Missing 'csv' field in request body.")
+
+    # Parse CSV — normalise header names to lowercase and strip surrounding whitespace
+    try:
+        reader = csv.DictReader(io.StringIO(csv_data.strip()))
+        if reader.fieldnames:
+            reader.fieldnames = [f.strip().lower() for f in reader.fieldnames]
+        rows = list(reader)
+    except Exception as e:
+        logger.warning("Failed to parse CSV: %s", e)
+        raise HTTPException(status_code=400, detail="Failed to parse CSV. Ensure the file is valid CSV with the required headers.")
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="CSV contains no data rows.")
+
+    # Validate required fields and collect non-empty optional ones per row
+    attributes = []
+    for i, row in enumerate(rows, start=1):
+        attr_type  = row.get("type",  "").strip()
+        attr_value = row.get("value", "").strip()
+        if not attr_type or not attr_value:
+            raise HTTPException(status_code=400, detail=f"Row {i} is missing required field(s): 'type' and 'value' must both be set.")
+        attr = {"type": attr_type, "value": attr_value}
+        for field in ("category", "comment", "first_seen", "last_seen"):
+            v = row.get(field, "").strip()
+            if v:
+                attr[field] = v
+        attributes.append(attr)
+
+    context = 'csv'
+
+    if token:
+        uuid = token_to_uuid(token)
+        if not uuid:
+            raise HTTPException(status_code=404, detail="Invalid token.")
+        event = pymisp.get_event(uuid, pythonify=True)
+        if isinstance(event, dict) and "errors" in event:
+            logger.error(f"Error fetching event: {json.dumps(event['errors'])}")
+            raise HTTPException(status_code=403, detail="Invalid MISP event or no access.")
+        if options:
+            event = add_optional_form_data(event, options)
+    else:
+        event = create_misp_event()
+        if options:
+            event = add_optional_form_data(event, options)
+
+    for attr in attributes:
+        attr_type  = attr.pop("type")
+        attr_value = attr.pop("value")
+        event.add_attribute(attr_type, attr_value, **attr)
+
+    if token:
+        saved_event = pymisp.update_event(event, event_id=uuid)
+    else:
+        saved_event = pymisp.add_event(event)
+
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error saving event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not save event to MISP.")
+
+    action_type = 'create'
+    if token:
+        action_type = 'modify'
+        touch_token(token)
+    else:
+        token = generate_token()
+        if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
+            raise HTTPException(status_code=500, detail="Could not store token.")
+
+    enhanced_text = modules_enhance(action_type, context, saved_event)
+    modules_update(context, action_type, event, token, [], enhanced_text)
+    return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
+
 
 @app.post("/share/stix")
 async def share_stix(
@@ -405,7 +527,12 @@ async def get_object_template(
 
         template_path = os.path.join(OBJECTS_DIR, template, "definition.json")
 
-        if not os.path.isfile(template_path):
+        # Resolve symlinks and confirm the real path stays within OBJECTS_DIR
+        real_path = os.path.realpath(template_path)
+        if not real_path.startswith(os.path.realpath(OBJECTS_DIR) + os.sep):
+            raise HTTPException(status_code=400, detail="Invalid template name.")
+
+        if not os.path.isfile(real_path):
             raise HTTPException(status_code=404, detail="Template not found.")
 
         try:
@@ -413,7 +540,8 @@ async def get_object_template(
                 definition = json.load(f)
             return JSONResponse(content=definition)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read template: {str(e)}")
+            logger.error("Failed to read template '%s': %s", template, e)
+            raise HTTPException(status_code=500, detail="Failed to read template.")
 
     # If no template is provided, list available templates
     try:
@@ -427,7 +555,8 @@ async def get_object_template(
             templates = [t for t in templates if t in template_whitelist]
         return templates
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
+        logger.error("Failed to list templates: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list templates.")
 
 if __name__ == "__main__":
     if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
