@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ── Checkouts ─────────────────────────────────────────────────────────
+      - name: Checkout Draugnet
+        uses: actions/checkout@v4
+        with:
+          path: draugnet
+          submodules: recursive
+
+      - name: Checkout MISP
+        uses: actions/checkout@v4
+        with:
+          repository: MISP/MISP
+          path: misp
+          submodules: recursive
+
+      # ── Services ──────────────────────────────────────────────────────────
+      - uses: getong/mariadb-action@v1.1
+        with:
+          host port: 3306
+          container port: 3306
+          mysql root password: 'bar'
+          mysql database: 'misp'
+          mysql user: 'misp'
+          mysql password: 'blah'
+
+      - uses: zhulik/redis-action@1.1.0
+        with:
+          redis version: '5'
+          number of databases: 100
+
+      # ── PHP (adds PPA — must come before apt-get installs) ───────────────
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysql, mbstring, xml, opcache, readline, redis, gd, apcu
+
+      # ── Install MISP ──────────────────────────────────────────────────────
+      - name: Initialize variables
+        run: |
+          echo "USER=$(id -u -n)" >> $GITHUB_ENV
+          echo "HOST=localhost" >> $GITHUB_ENV
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get -y update
+          sudo apt-get -y install curl apache2 libapache2-mod-php8.3 python3-virtualenv
+
+      - name: Install MISP
+        run: |
+          sudo chown $USER:www-data $HOME/.composer || true
+          pushd misp/app
+          composer config --no-plugins allow-plugins.composer/installers true
+          composer install --no-progress
+          popd
+
+          # Permissions
+          sudo chown -R $USER:www-data misp/
+          sudo chmod -R 775 misp/
+          sudo chmod -R g+ws misp/app/tmp
+          sudo chmod -R g+ws misp/app/tmp/cache
+          sudo chmod -R g+ws misp/app/tmp/cache/persistent
+          sudo chmod -R g+ws misp/app/tmp/cache/models
+          sudo chmod -R g+ws misp/app/tmp/logs
+          sudo chmod -R g+ws misp/app/files
+          sudo chmod -R g+ws misp/app/files/scripts/tmp
+
+          # Database
+          mysql -h 127.0.0.1 --port 3306 -u root -pbar \
+            -e "SET GLOBAL sql_mode = 'STRICT_ALL_TABLES';"
+          mysql -h 127.0.0.1 --port 3306 -u root -pbar \
+            -e "GRANT ALL PRIVILEGES ON misp.* TO 'misp'@'%' IDENTIFIED BY 'blah';"
+          mysql -h 127.0.0.1 --port 3306 -u misp -pblah misp \
+            < misp/INSTALL/MYSQL.sql
+
+          # Apache virtual host
+          sudo mkdir -p /etc/apache2/sites-available
+          sudo cp -f misp/build/github-action-ci-apache \
+            /etc/apache2/sites-available/misp.conf
+          sudo sed -i "s?%GITHUB_WORKSPACE%?$(pwd)/misp?g" \
+            /etc/apache2/sites-available/misp.conf
+          sudo sed -i "s?%HOST%?${HOST}?g" \
+            /etc/apache2/sites-available/misp.conf
+          sudo a2dissite 000-default
+          sudo a2ensite misp.conf
+          sudo a2enmod rewrite
+          sudo systemctl start --no-block apache2
+
+          # Configuration files
+          sudo cp misp/app/Config/bootstrap.default.php misp/app/Config/bootstrap.php
+          sudo cp misp/build/database.php              misp/app/Config/database.php
+          sudo cp misp/app/Config/core.default.php     misp/app/Config/core.php
+          sudo cp misp/app/Config/config.default.php   misp/app/Config/config.php
+          sudo cp misp/build/email.php                 misp/app/Config/email.php
+          sudo chown -R $USER:www-data misp/
+
+          # Allow Apache to traverse the runner workspace
+          sudo chmod +x /home/runner/work
+          sudo chmod +x /home/runner
+          sudo chmod +x /home
+          sudo chmod +x /
+
+      # MISP uses its own Python venv for server-side STIX import/export.
+      # Without misp-stix installed and MISP.python_bin pointing at it,
+      # /events/upload_stix/2 and return_format=stix2 both return errors.
+      - name: Setup MISP Python environment
+        run: |
+          python3 -m virtualenv -p python3 misp/venv
+          pushd misp
+          . venv/bin/activate
+          export PYTHONPATH=$PYTHONPATH:./app/files/scripts
+          pip install -r requirements.txt
+          deactivate
+          popd
+
+      - name: Configure MISP
+        run: |
+          pushd misp
+          app/Console/cake Admin setSetting "MISP.server_settings_skip_backup_rotate" 1
+          app/Console/cake Admin setSetting "MISP.osuser" "$USER"
+          app/Console/cake Admin runUpdates
+
+          # Init creates the default organisation (ID 1) and admin user — must
+          # run before any setting that validates against the org table.
+          app/Console/cake User init | tee /tmp/misp_auth.txt
+          echo "AUTH=$(cat /tmp/misp_auth.txt)" >> $GITHUB_ENV
+
+          app/Console/cake Admin setSetting "Session.autoRegenerate" 0
+          app/Console/cake Admin setSetting "Session.timeout" 600
+          app/Console/cake Admin setSetting "Session.cookieTimeout" 3600
+          app/Console/cake Admin setSetting "MISP.host_org_id" 1
+          app/Console/cake Admin setSetting "MISP.email" "info@admin.test"
+          app/Console/cake Admin setSetting --force "MISP.disable_emailing" true
+          app/Console/cake Admin setSetting --force "debug" true
+          app/Console/cake Admin setSetting "MISP.redis_host" "127.0.0.1"
+          app/Console/cake Admin setSetting "MISP.redis_port" 6379
+          app/Console/cake Admin setSetting "MISP.redis_database" 13
+          app/Console/cake Admin setSetting "MISP.redis_password" ""
+          app/Console/cake Admin setSetting "SimpleBackgroundJobs.enabled" 0
+          app/Console/cake Admin setSetting "MISP.python_bin" "$GITHUB_WORKSPACE/misp/venv/bin/python"
+          app/Console/cake Admin live 1
+          popd
+
+      - name: Verify MISP is reachable
+        run: |
+          curl -sf \
+            -H "Authorization: $AUTH" \
+            -H "Accept: application/json" \
+            http://localhost/users/view/me.json > /dev/null
+
+      # ── Install and configure Draugnet ────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: draugnet/requirements.txt
+
+      - name: Install Draugnet dependencies
+        run: pip install -r draugnet/requirements.txt httpx pytest
+
+      - name: Configure Draugnet
+        run: |
+          cat > draugnet/config/settings.py << EOF
+          misp_config = {
+              'url': 'http://localhost',
+              'key': '${AUTH}',
+              'verifycert': False,
+          }
+          redis_config = {
+              'host': 'localhost',
+              'port': 6379,
+              'db': 5,
+          }
+          allowed_origins = []
+          draugnet_config = {
+              'misp_object_templates': [],
+              'ssl_cert_path': '',
+              'ssl_key_path': '',
+              'port': 8999,
+              'name': 'CI',
+          }
+          modules_config = {}
+          EOF
+
+      - name: Start Draugnet
+        working-directory: draugnet
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8999 &
+          sleep 3
+          curl -sf http://localhost:8999/ \
+            || { echo "Draugnet failed to start"; exit 1; }
+
+      # ── Tests ──────────────────────────────────────────────────────────────
+      - name: Run tests
+        working-directory: draugnet
+        env:
+          DRAUGNET_URL: http://localhost:8999
+        run: pytest tests/test_api.py -v
+
+      # ── Logs on failure ───────────────────────────────────────────────────
+      - name: Apache logs
+        if: failure()
+        run: |
+          sudo tail -n 50 /var/log/apache2/error.log || true
+          sudo tail -n 50 /var/log/apache2/access.log || true
+
+      - name: MISP logs
+        if: failure()
+        run: tail -n +1 misp/app/tmp/logs/* || true
