@@ -129,7 +129,7 @@ jobs:
           app/Console/cake Admin setSetting "Session.cookieTimeout" 3600
           app/Console/cake Admin setSetting "MISP.host_org_id" 1
           app/Console/cake Admin setSetting "MISP.email" "info@admin.test"
-          app/Console/cake Admin setSetting "MISP.disable_emailing" true
+          app/Console/cake Admin setSetting --force "MISP.disable_emailing" true
           app/Console/cake Admin setSetting --force "debug" true
           app/Console/cake Admin setSetting "MISP.redis_host" "127.0.0.1"
           app/Console/cake Admin setSetting "MISP.redis_port" 6379
