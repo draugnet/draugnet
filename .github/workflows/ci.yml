@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# A fixed, known API key used throughout this workflow.
+# It must be exactly 40 characters — standard MISP authkey length.
+env:
+  MISP_AUTHKEY: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  MISP_URL: "http://localhost:5000"
+  DRAUGNET_URL: "http://localhost:8999"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      # ── Redis ────────────────────────────────────────────────────────────
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      # ── MySQL (MISP database) ─────────────────────────────────────────────
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: misp_root
+          MYSQL_DATABASE: misp
+          MYSQL_USER: misp
+          MYSQL_PASSWORD: misp
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmisp_root"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── Start MISP ─────────────────────────────────────────────────────────
+      # Using --network host so the container can reach the services above
+      # (MySQL on 127.0.0.1:3306, Redis on 127.0.0.1:6379) without extra
+      # networking configuration.
+      - name: Start MISP
+        run: |
+          docker run -d \
+            --name misp \
+            --network host \
+            -e MISP_BASEURL=${{ env.MISP_URL }} \
+            -e MISP_ADMIN_EMAIL=admin@admin.test \
+            -e MISP_ADMIN_PASSPHRASE=Password1234 \
+            -e MISP_ADMIN_AUTHKEY=${{ env.MISP_AUTHKEY }} \
+            -e MYSQL_HOST=127.0.0.1 \
+            -e MYSQL_PORT=3306 \
+            -e MYSQL_DATABASE=misp \
+            -e MYSQL_USER=misp \
+            -e MYSQL_PASSWORD=misp \
+            -e REDIS_HOST=127.0.0.1 \
+            -e REDIS_PORT=6379 \
+            ghcr.io/misp/misp-docker/misp:latest
+
+      # ── Wait for MISP ──────────────────────────────────────────────────────
+      # MISP needs to create the DB schema and seed initial data on first boot.
+      # Poll the /users/view/me.json endpoint until the admin key is accepted.
+      # Timeout: 60 × 10 s = 10 minutes.
+      - name: Wait for MISP to be ready
+        run: |
+          echo "Waiting for MISP to initialise (can take several minutes)…"
+          for i in $(seq 1 60); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: ${{ env.MISP_AUTHKEY }}" \
+              -H "Accept: application/json" \
+              ${{ env.MISP_URL }}/users/view/me.json)
+            if [ "$STATUS" = "200" ]; then
+              echo "MISP is ready (attempt $i)."
+              break
+            fi
+            echo "  attempt $i/60 — HTTP $STATUS — retrying in 10 s…"
+            sleep 10
+          done
+
+          # Hard fail if MISP never became ready
+          curl -sf \
+            -H "Authorization: ${{ env.MISP_AUTHKEY }}" \
+            -H "Accept: application/json" \
+            ${{ env.MISP_URL }}/users/view/me.json > /dev/null \
+            || { echo "MISP did not become ready in time."; docker logs misp; exit 1; }
+
+      # ── Python + Draugnet ─────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt httpx pytest
+
+      - name: Configure Draugnet
+        run: |
+          cat > config/settings.py << EOF
+          misp_config = {
+              'url': '${{ env.MISP_URL }}',
+              'key': '${{ env.MISP_AUTHKEY }}',
+              'verifycert': False,
+          }
+          redis_config = {
+              'host': 'localhost',
+              'port': 6379,
+              'db': 5,
+          }
+          allowed_origins = []
+          draugnet_config = {
+              'misp_object_templates': [],
+              'ssl_cert_path': '',
+              'ssl_key_path': '',
+              'port': 8999,
+              'name': 'CI',
+          }
+          modules_config = {}
+          EOF
+
+      - name: Start Draugnet
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8999 &
+          sleep 3
+          curl -sf http://localhost:8999/ \
+            || { echo "Draugnet failed to start."; exit 1; }
+
+      # ── Tests ──────────────────────────────────────────────────────────────
+      - name: Run tests
+        run: pytest tests/test_api.py -v
