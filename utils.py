@@ -4,8 +4,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pymisp import PyMISP, MISPEvent, MISPEventReport, MISPObject
 from fastapi import HTTPException
 from config.settings import misp_config, redis_config, draugnet_config, modules_config
-import random
-import string
+import secrets
 import re
 import os
 import time
@@ -109,8 +108,7 @@ def is_authorised():
     return True
 
 def generate_token():
-    # generate random 32 character token
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+    return secrets.token_urlsafe(32)
 
 # function to store a uuid at a key derived from the passed token in the format message:<token>
 def store_token_to_uuid(token: str, uuid: str):
@@ -220,7 +218,9 @@ def add_optional_form_data(event: MISPEvent, options: dict):
         event.add_event_report("Additional report description", options["description"])
 
     if "submitter" in options.keys() and options["submitter"].strip():
-        event.add_tag("submitter:" + options["submitter"].strip())
+        submitter = re.sub(r'[^a-zA-Z0-9@._\- ]', '', options["submitter"].strip())[:128]
+        if submitter:
+            event.add_tag("submitter:" + submitter)
 
     return event
 
@@ -238,8 +238,8 @@ def create_misp_object(pymisp: PyMISP, template: str, data: dict):
                     misp_object.add_attribute(object_relation, value=value)
         return misp_object
     except Exception as e:
-        logger.error(f"Error creating MISP object: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Object creation failed. {current_stage} - {str(e)}")
+        logger.error(f"Error creating MISP object at '{current_stage}': {str(e)}")
+        raise HTTPException(status_code=500, detail="Object creation failed.")
     
 async def retrieve_event_by_token(token: str, format: str = "json"):
     uuid = token_to_uuid(token)

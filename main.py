@@ -36,6 +36,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MAX_REQUEST_BODY = 50 * 1024 * 1024  # 50 MB
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY:
+                return JSONResponse({"detail": "Request body too large."}, status_code=413)
+        except ValueError:
+            pass
+    return await call_next(request)
+
 
 @app.get("/")
 async def root():
@@ -51,7 +64,7 @@ async def root():
     }
 
 @app.get("/share")
-async def root():
+async def get_share_formats():
     return {
         "formats": {
             "misp": {
@@ -196,7 +209,7 @@ async def post_raw(
             raise HTTPException(status_code=500, detail="Could not attach event report.")
     except Exception as e:
         logger.exception("Exception while adding event report.")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not attach event report.")
     report_uuid = response["EventReport"]["uuid"]
     try:
         result = extract_report_entities(pymisp, report_uuid)
@@ -204,7 +217,7 @@ async def post_raw(
             raise HTTPException(status_code=500, detail="Could not extract entities from report.")
     except Exception as e:
         logger.exception("Exception while extracting entities from report.")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not extract entities from report.")
     action_type = 'create'
     if token:
         action_type = 'modify'
@@ -316,7 +329,8 @@ async def share_csv(
             reader.fieldnames = [f.strip().lower() for f in reader.fieldnames]
         rows = list(reader)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+        logger.warning("Failed to parse CSV: %s", e)
+        raise HTTPException(status_code=400, detail="Failed to parse CSV. Ensure the file is valid CSV with the required headers.")
 
     if not rows:
         raise HTTPException(status_code=400, detail="CSV contains no data rows.")
@@ -513,7 +527,12 @@ async def get_object_template(
 
         template_path = os.path.join(OBJECTS_DIR, template, "definition.json")
 
-        if not os.path.isfile(template_path):
+        # Resolve symlinks and confirm the real path stays within OBJECTS_DIR
+        real_path = os.path.realpath(template_path)
+        if not real_path.startswith(os.path.realpath(OBJECTS_DIR) + os.sep):
+            raise HTTPException(status_code=400, detail="Invalid template name.")
+
+        if not os.path.isfile(real_path):
             raise HTTPException(status_code=404, detail="Template not found.")
 
         try:
@@ -521,7 +540,8 @@ async def get_object_template(
                 definition = json.load(f)
             return JSONResponse(content=definition)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read template: {str(e)}")
+            logger.error("Failed to read template '%s': %s", template, e)
+            raise HTTPException(status_code=500, detail="Failed to read template.")
 
     # If no template is provided, list available templates
     try:
@@ -535,7 +555,8 @@ async def get_object_template(
             templates = [t for t in templates if t in template_whitelist]
         return templates
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
+        logger.error("Failed to list templates: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list templates.")
 
 if __name__ == "__main__":
     if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
