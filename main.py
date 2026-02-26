@@ -39,7 +39,16 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {
+        "name": "Draugnet",
+        "description": "Threat intelligence submission API — accepts indicators in multiple formats and ingests them into MISP.",
+        "docs": "/docs",
+        "endpoints": {
+            "submission_formats": "/share",
+            "view_report":        "/view/{token}",
+            "sharing_groups":     "/sharing_groups",
+        },
+    }
 
 @app.get("/share")
 async def root():
