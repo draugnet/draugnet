@@ -25,6 +25,17 @@ In fact, Draugnet supports fully anonymous submissions of data this way. Draugne
 - **Supported retrieval formats**: By default, you will be receiving updates to your data in the MISP JSON format. But you can optionally also fetch the data in any of the supported formats of MISP (such as CSV, Suricata, STIX2, Nibbler).
 - **Updating reports**: You can always append new information using any of the supported submission formats by POSTing your new data to be shared to the endpoint you'd use for submissions, but with your token appended as a query string (?token={token})
 
+### Modules
+
+Draugnet comes with modular integrations that can be enabled as needed:
+
+- **Reporting**:  
+  - [RTIR](https://github.com/bestpractical/rtir) — Create reports directly in RTIR.  
+  - [Flowintel](https://github.com/flowintel/flowintel) — Create reports directly in flowintel. 
+
+- **Enhancement**:  
+  - [Ollama](https://ollama.com/) — Leverage LLMs to provide contextual insights and automated text enhancements.  
+
 ### Installation
 
 If you wish to install draugnet via docker, head over to the [draugnet-docker repo](https://github.com/draugnet/draugnet-docker)

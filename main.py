@@ -9,6 +9,7 @@ import json
 import os
 import ssl
 import uvicorn
+import httpx
 
 from utils import *
 
@@ -58,6 +59,12 @@ async def root():
                 "name": "Objects",
                 "description": "Data encoded as MISP Objects",
                 "url": "/share/objects",
+                "method": "POST"
+            },
+            "stix": {
+                "name": "STIX",
+                "description": "STIX 2.0/2.1 bundle",
+                "url": "/share/stix",
                 "method": "POST"
             }
         }
@@ -264,6 +271,93 @@ async def post_objects(
     modules_update(context, action_type, event, token, [])
     
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
+
+@app.post("/share/stix")
+async def share_stix(
+    request: Request,
+    token: Optional[str] = Query(None, description="Optional access token for editing an existing report")
+) -> JSONResponse:
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    body = await request.body()
+    body = json.loads(body)
+    options = body.get("optional", {})
+    stix_data = body.get("stix")
+
+    if not stix_data:
+        raise HTTPException(status_code=400, detail="Missing 'stix' field in request body.")
+
+    # Normalise: keep both a parsed dict and a JSON string for the API call
+    if isinstance(stix_data, dict):
+        stix_str = json.dumps(stix_data)
+        stix_parsed = stix_data
+    else:
+        stix_str = stix_data
+        try:
+            stix_parsed = json.loads(stix_str)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid STIX JSON.")
+
+    # STIX 2.x bundles carry a 'bundle--{uuid}' id that MISP uses as the event UUID
+    bundle_id = stix_parsed.get("id", "")
+    if not bundle_id.startswith("bundle--"):
+        raise HTTPException(
+            status_code=400,
+            detail="Could not determine event UUID from STIX. Only STIX 2.0/2.1 bundles are supported."
+        )
+    event_uuid = bundle_id[len("bundle--"):]
+
+    if token:
+        existing_uuid = token_to_uuid(token)
+        if not existing_uuid:
+            raise HTTPException(status_code=404, detail="Invalid token.")
+
+    # Import the STIX bundle into MISP via a direct HTTP call.
+    # PyMISP's upload_stix() and direct_call() both mangle the request in a way that
+    # triggers MISP's STIX 1 handler, so we call the endpoint ourselves with httpx.
+    # MISP may return an error for non-critical reasons (e.g. saving the original file as
+    # an attachment fails due to filesystem permissions) while still creating the event
+    # successfully. We therefore always attempt to fetch the event by its UUID and only
+    # treat a missing event as a hard failure.
+    stix_import_url = f"{misp_config['url']}/events/upload_stix/2"
+    stix_headers = {
+        "Authorization": misp_config["key"],
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(verify=misp_config.get("verifycert", True)) as client:
+        stix_response = await client.post(stix_import_url, content=stix_str, headers=stix_headers)
+    if not stix_response.is_success:
+        logger.warning(f"STIX import returned non-success status {stix_response.status_code}: {stix_response.text[:200]}")
+
+    # Fetch the imported event so we can apply optional metadata
+    event = pymisp.get_event(event_uuid, pythonify=True)
+    if isinstance(event, dict) and "errors" in event:
+        logger.error(f"Could not fetch event after STIX import: {json.dumps(event.get('errors', {}))}")
+        raise HTTPException(status_code=500, detail="Could not import STIX data. Ensure the bundle is valid STIX 2.0 or 2.1.")
+
+    if options:
+        event = add_optional_form_data(event, options)
+        pymisp.update_event(event, event_id=event_uuid)
+
+    context = 'stix'
+    action_type = 'create'
+    if token:
+        action_type = 'modify'
+        touch_token(token)
+    else:
+        token = generate_token()
+        if not store_token_to_uuid(token, event_uuid):
+            raise HTTPException(status_code=500, detail="Could not store token.")
+
+    enhanced_text = modules_enhance(action_type, context, stix_str)
+    modules_update(context, action_type, event, token, [], enhanced_text)
+    return {"token": token, "event_uuid": event_uuid, "status": "ok"}
 
 
 # GET version (token in path, format in query)
