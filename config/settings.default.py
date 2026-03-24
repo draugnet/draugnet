@@ -19,6 +19,20 @@ modules_config = {
             # 'verifycert': True
         }
     },
+    "alerting": {
+        "email": {
+            # "enabled": True,
+            # "smtp_host": "localhost",       # SMTP relay hostname
+            # "smtp_port": 25,                # SMTP relay port
+            # "smtp_tls": False,              # Use implicit TLS (SMTPS, typically port 465)
+            # "smtp_starttls": False,         # Use STARTTLS (typically port 587)
+            # "smtp_username": "",            # Leave empty if relay does not require auth
+            # "smtp_password": "",
+            # "sender": "draugnet@example.com",
+            # "recipients": ["soc@example.com"],
+            # "subject_prefix": "[Draugnet]"
+        }
+    },
     "enhancements": {
         "ollama": {
             # "enabled": True,

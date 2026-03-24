@@ -88,7 +88,8 @@ def get_module(module_type: str, module_name: str):
 
         required_methods = {
             "reporting": ["create_item", "update_item"],
-            "enhancements": ["run"]
+            "enhancements": ["run"],
+            "alerting": ["send"]
         }
 
         # We don’t enforce a strict signature—just ensure methods exist
@@ -102,6 +103,109 @@ def get_module(module_type: str, module_name: str):
 
     logger.error("%s does not export a 'Module' class.", package)
     return None
+
+def send_alert_email(subject: str, body: str, **kwargs) -> bool:
+    """Send an alert e-mail if the email alerting module is enabled.
+
+    Returns True on success, False if disabled or on failure.
+    """
+    mod = get_module("alerting", "email")
+    if not mod:
+        return False
+    return mod.send(subject, body, **kwargs)
+
+
+def send_submission_alert(action_type: str, context: str, event: Any, options: Optional[Dict[str, Any]] = None) -> bool:
+    """Build and send an alert e-mail for a new or updated submission."""
+    if not is_module_enabled("alerting", "email"):
+        return False
+
+    instance_name = draugnet_config.get("name", "Draugnet")
+
+    # Action description
+    if action_type == "modify":
+        action = "updated an existing report"
+    else:
+        action = "submitted a new report"
+
+    # Submitter info from optional metadata or event tags
+    submitter = "Anonymous"
+    if options and options.get("submitter", "").strip():
+        submitter = options["submitter"].strip()
+    elif hasattr(event, "tags") and event.tags:
+        for tag in event.tags:
+            tag_name = tag.name if hasattr(tag, "name") else str(tag)
+            if tag_name.startswith("submitter:"):
+                submitter = tag_name.split("submitter:", 1)[-1]
+                break
+    elif isinstance(event, dict):
+        for tag in event.get("Event", event).get("Tag", []):
+            if tag.get("name", "").startswith("submitter:"):
+                submitter = tag["name"].split("submitter:", 1)[-1]
+                break
+
+    # Event title
+    event_info = "Draugnet report"
+    if hasattr(event, "info") and event.info:
+        event_info = event.info
+    elif isinstance(event, dict):
+        event_info = event.get("Event", event).get("info", event_info)
+
+    # TLP / PAP from options
+    tlp = ""
+    pap = ""
+    if options:
+        tlp = options.get("tlp", "")
+        pap = options.get("pap", "")
+
+    # Brief content summary
+    summary_parts = []
+    summary_parts.append(f"Submission format: {context}")
+
+    attr_count = 0
+    obj_count = 0
+    report_count = 0
+    if hasattr(event, "attributes"):
+        attr_count = len(event.attributes) if event.attributes else 0
+    elif isinstance(event, dict):
+        inner = event.get("Event", event)
+        attr_count = len(inner.get("Attribute", []))
+    if hasattr(event, "objects"):
+        obj_count = len(event.objects) if event.objects else 0
+    elif isinstance(event, dict):
+        inner = event.get("Event", event)
+        obj_count = len(inner.get("Object", []))
+    if hasattr(event, "event_reports"):
+        report_count = len(event.event_reports) if event.event_reports else 0
+    elif isinstance(event, dict):
+        inner = event.get("Event", event)
+        report_count = len(inner.get("EventReport", []))
+
+    if attr_count:
+        summary_parts.append(f"Attributes: {attr_count}")
+    if obj_count:
+        summary_parts.append(f"Objects: {obj_count}")
+    if report_count:
+        summary_parts.append(f"Reports: {report_count}")
+
+    # Build the e-mail body
+    body_lines = [
+        f"A user has {action} on {instance_name}.",
+        "",
+        f"Submitter: {submitter}",
+        f"Report title: {event_info}",
+    ]
+    if tlp:
+        body_lines.append(f"TLP: {tlp}")
+    if pap:
+        body_lines.append(f"PAP: {pap}")
+    body_lines.append("")
+    body_lines.append("Summary")
+    body_lines.append("-" * 40)
+    body_lines.extend(summary_parts)
+
+    subject = f"{'Updated' if action_type == 'modify' else 'New'} report: {event_info}"
+    return send_alert_email(subject, "\n".join(body_lines))
 
 def is_authorised():
     # Implement your authorization logic here
