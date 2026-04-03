@@ -152,6 +152,7 @@ async def share_misp_event(
     context = 'misp'
     enhanced_text = modules_enhance(action_type, context, data)
     modules_update(context, action_type, event, token, [], enhanced_text)
+    send_submission_alert(action_type, context, saved_event, options if options else None)
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 @app.post("/share/raw")
@@ -229,6 +230,7 @@ async def post_raw(
             raise HTTPException(status_code=500, detail="Could not store token.")
     enhanced_text = modules_enhance(action_type, context, raw_text_str)
     modules_update(context, action_type, event, token, [event_report], enhanced_text)
+    send_submission_alert(action_type, context, event, data.get("optional"))
     return {"token": token, "event_uuid": event_uuid, "status": "ok"}
 
 @app.post("/share/objects")
@@ -299,7 +301,7 @@ async def post_objects(
         
     enhanced_text = modules_enhance(action_type, context, saved_event)
     modules_update(context, action_type, event, token, [])
-    
+    send_submission_alert(action_type, context, event, optional if optional else None)
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 @app.post("/share/csv")
@@ -391,6 +393,7 @@ async def share_csv(
 
     enhanced_text = modules_enhance(action_type, context, saved_event)
     modules_update(context, action_type, event, token, [], enhanced_text)
+    send_submission_alert(action_type, context, event, options if options else None)
     return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 
@@ -479,6 +482,7 @@ async def share_stix(
 
     enhanced_text = modules_enhance(action_type, context, stix_str)
     modules_update(context, action_type, event, token, [], enhanced_text)
+    send_submission_alert(action_type, context, event, options if options else None)
     return {"token": token, "event_uuid": event_uuid, "status": "ok"}
 
 
