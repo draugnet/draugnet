@@ -498,7 +498,7 @@ async def retrieve_event_get(
 # POST version (token and format in request body)
 @app.post("/retrieve")
 async def retrieve_event_post(
-    body: dict = Body(..., example={"token": "abc123", "format": "json"})
+    body: dict = Body(..., examples=[{"token": "abc123", "format": "json"}])
 ):
     token = body.get("token")
     format = body.get("format", "json")
