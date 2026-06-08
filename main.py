@@ -23,6 +23,7 @@ if draugnet_config.get("port"):
 else:
     port = 8999
 host = draugnet_config.get("host", "0.0.0.0")
+forwarded_allow_ips = draugnet_config.get("forwarded_allow_ips", "127.0.0.1")
     
 app = FastAPI()
 logger = logging.getLogger('uvicorn.error')
@@ -564,6 +565,6 @@ if __name__ == "__main__":
         ssl_key_path = draugnet_config.get("ssl_key_path")
         ssl_certfile = draugnet_config.get("ssl_cert_path")
     try:
-        uvicorn.run("main:app", host=host, port=port, ssl_keyfile=ssl_key_path, ssl_certfile=ssl_certfile)
+        uvicorn.run("main:app", host=host, port=port, ssl_keyfile=ssl_key_path, ssl_certfile=ssl_certfile, forwarded_allow_ips=forwarded_allow_ips)
     except NameError:
-        uvicorn.run("main:app", host=host, port=port)
+        uvicorn.run("main:app", host=host, port=port, forwarded_allow_ips=forwarded_allow_ips)
