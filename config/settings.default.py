@@ -58,5 +58,7 @@ draugnet_config = {
    ],
    "ssl_cert_path": "",
    "ssl_key_path": "",
-   "name": "Draugnet" # Name of the instance, used in various places to identify the source when multiple instances are used
+   "name": "Draugnet", # Name of the instance, used in various places to identify the source when multiple instances are used
+   # "host": "::",
+   # "port": 8999, 
 }
