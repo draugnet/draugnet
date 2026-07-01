@@ -16,6 +16,7 @@ import io
 from utils import *
 import template_loader
 import template_data
+import template_instantiator
 
 if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -97,6 +98,12 @@ async def get_share_formats():
                 "name": "CSV",
                 "description": "CSV with columns: category, type, value, first_seen, last_seen, comment (type and value required)",
                 "url": "/share/csv",
+                "method": "POST"
+            },
+            "template": {
+                "name": "Event template",
+                "description": "Guided submission from a MISP event template",
+                "url": "/share/template",
                 "method": "POST"
             }
         }
@@ -486,6 +493,62 @@ async def share_stix(
     modules_update(context, action_type, event, token, [], enhanced_text)
     send_submission_alert(action_type, context, event, options if options else None)
     return {"token": token, "event_uuid": event_uuid, "status": "ok"}
+
+
+@app.post("/share/template")
+async def share_template(request: Request) -> JSONResponse:
+    """Instantiate an event template into a MISP event (PRD B14, create-only).
+
+    Body: ``{"template_uuid": "...", "values": {<element_id>: <value(s)>},
+    "optional": {"pap": ..., "submitter": ..., "description": ...}}``.
+    Returns ``{"token": ..., "event_uuid": ..., "status": "ok"}``.
+    """
+    pymisp = get_misp()
+    redis = get_redis()
+    if not pymisp or not redis:
+        raise HTTPException(status_code=500, detail="Could not connect to MISP or Redis.")
+    if not is_authorised():
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    try:
+        body = json.loads(await request.body())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+
+    template_uuid = body.get("template_uuid")
+    if not template_uuid:
+        raise HTTPException(status_code=400, detail="Missing 'template_uuid' field in request body.")
+    values = body.get("values") or {}
+    optional = body.get("optional") or {}
+
+    # Load and schema-validate the template (create-only: no token append, D7).
+    try:
+        definition = await template_loader.get_template(template_uuid)
+    except template_loader.TemplateNotFound:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    except template_loader.TemplateInvalid as e:
+        raise HTTPException(status_code=422, detail=f"Invalid template definition: {e.reason}")
+
+    # Build + validate the whole event in memory before touching MISP (B18).
+    event = template_instantiator.build_event(definition, values, optional)
+
+    saved_event = pymisp.add_event(event)
+    if isinstance(saved_event, dict) and "errors" in saved_event:
+        logger.error(f"Error saving templated event: {json.dumps(saved_event['errors'])}")
+        raise HTTPException(status_code=500, detail="Could not save event to MISP.")
+
+    token = generate_token()
+    if not store_token_to_uuid(token, saved_event["Event"]["uuid"]):
+        raise HTTPException(status_code=500, detail="Could not store token.")
+
+    context = f'template ({definition.get("name")})'
+    action_type = 'create'
+    enhanced_text = modules_enhance(action_type, context, saved_event)
+    modules_update(context, action_type, event, token, [], enhanced_text)
+    send_submission_alert(action_type, context, event, optional if optional else None)
+    return {"token": token, "event_uuid": saved_event["Event"]["uuid"], "status": "ok"}
 
 
 # GET version (token in path, format in query)
