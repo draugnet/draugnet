@@ -501,6 +501,18 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     _build_object_references(definition, object_instances, warnings)
     _build_field_tags(event, definition, values, seen_tags)
 
+    # Slim hybrid metadata (D5): the template owns info/distribution/threat/
+    # analysis/tags/galaxies; the generic block contributes only PAP (tag),
+    # submitter (submitter:<name> tag) and description (event report). Layered on
+    # top via the existing helper so behaviour matches the other submit formats.
+    slim = {}
+    for key in ("pap", "submitter", "description"):
+        value = optional.get(key)
+        if value not in (None, "", [], "undefined"):
+            slim[key] = value
+    if slim:
+        event = add_optional_form_data(event, slim)
+
     if warnings:
         for w in warnings:
             logger.warning("template instantiation: %s", w)
