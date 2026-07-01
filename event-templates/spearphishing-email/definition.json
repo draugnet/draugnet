@@ -1,0 +1,267 @@
+{
+  "description": "Extract IOCs from a flagged email and structure them for downstream detection. Use for any inbound email reported by a user or flagged by a gateway as suspicious — credential phishing, malware delivery, BEC, or otherwise.",
+  "event_defaults": {
+    "analysis": 0,
+    "distribution": 1,
+    "info_template": "Spearphishing — {{date}} — {{field:sender}}",
+    "tags": [
+      {
+        "locked": false,
+        "name": "tlp:amber"
+      }
+    ],
+    "threat_level_id": 2
+  },
+  "library_metadata": {
+    "authors": [
+      {
+        "contact": "info@misp-project.org",
+        "name": "MISP Project"
+      }
+    ],
+    "compatible_misp_version": "2.5.0",
+    "tags": [
+      "incident-response",
+      "email",
+      "phishing",
+      "spearphishing"
+    ]
+  },
+  "misp_default": true,
+  "name": "Spearphishing email triage",
+  "schema_version": 1,
+  "structure": [
+    {
+      "help": "Anything visible in the raw headers of the reported message. If you only have the rendered email, copy what you can see; if you have the full .eml, use it for the **Email object** section below.",
+      "id": "s_headers",
+      "label": "Email headers",
+      "type": "section"
+    },
+    {
+      "help": "The address in the `From:` header — exactly as it appears, do not normalise. If the message is spoofed and you have the envelope-from from headers like `Return-Path:`, capture that under **Envelope sender** below.",
+      "id": "sender",
+      "label": "Sender email",
+      "mandatory": true,
+      "misp": {
+        "category": "Payload delivery",
+        "comment_template": "From: header",
+        "to_ids_default": true,
+        "type": "email-src"
+      },
+      "parent": "s_headers",
+      "type": "attribute_field"
+    },
+    {
+      "help": "The address in `Return-Path:` or the SMTP `MAIL FROM` if you have access to gateway logs. Often differs from `From:` in spoofed mail.",
+      "id": "envelope_sender",
+      "label": "Envelope sender",
+      "mandatory": false,
+      "misp": {
+        "category": "Payload delivery",
+        "comment_template": "Envelope sender (Return-Path / MAIL FROM)",
+        "to_ids_default": true,
+        "type": "email-src"
+      },
+      "parent": "s_headers",
+      "type": "attribute_field"
+    },
+    {
+      "help": "Verbatim subject. If the message is part of a wider campaign, the subject is often a strong correlator.",
+      "id": "subject",
+      "label": "Subject line",
+      "mandatory": true,
+      "misp": {
+        "category": "Payload delivery",
+        "type": "email-subject"
+      },
+      "parent": "s_headers",
+      "type": "attribute_field"
+    },
+    {
+      "help": "The first non-internal IP in the `Received:` chain. Skip if the chain is fully internal.",
+      "id": "received_from_ip",
+      "label": "Originating IP",
+      "mandatory": false,
+      "misp": {
+        "category": "Network activity",
+        "to_ids_default": true,
+        "type": "ip-src"
+      },
+      "parent": "s_headers",
+      "type": "attribute_field"
+    },
+    {
+      "help": "If you have the raw `.eml`, fill the structured fields below. Strongly recommended — it gives correlators the most to work with.",
+      "id": "s_email_object",
+      "label": "Full email object",
+      "type": "section"
+    },
+    {
+      "help": "Structured representation of the full email. Mandatory sub-fields are flagged.",
+      "id": "obj_email",
+      "label": "Email message",
+      "mandatory": false,
+      "object_template": {
+        "minimum_version": 19,
+        "name": "email",
+        "uuid": "a0c666e0-fc65-4be8-b48f-3423d788b552"
+      },
+      "parent": "s_email_object",
+      "relations": [
+        {
+          "help_override": "Same value as **Sender email** above.",
+          "label_override": "From: header",
+          "mandatory": true,
+          "object_relation": "from"
+        },
+        {
+          "help_override": "Same value as **Subject line** above.",
+          "label_override": "Subject",
+          "mandatory": true,
+          "object_relation": "subject"
+        },
+        {
+          "help_override": "Attach the raw RFC 5322 message if you have it. Optional but strongly encouraged — gives downstream tools the full header set, MIME structure, and any embedded attachments.",
+          "label_override": "Raw .eml file",
+          "mandatory": false,
+          "object_relation": "eml"
+        },
+        {
+          "help_override": "Verbatim value of the `Message-ID:` header.",
+          "label_override": "Message-ID header",
+          "mandatory": false,
+          "object_relation": "message-id"
+        },
+        {
+          "help_override": "Often the smoking gun for credential phishing — the displayed `From:` matches the brand, but `Reply-To:` points elsewhere.",
+          "label_override": "Reply-To header",
+          "mandatory": false,
+          "object_relation": "reply-to"
+        }
+      ],
+      "type": "object_field"
+    },
+    {
+      "help": "Files that came with the email, if any. One **File** object per attachment; expand to fill in hashes.",
+      "id": "s_attachments",
+      "label": "Attachments",
+      "type": "section"
+    },
+    {
+      "help": "If you have the file, hash it and capture filename + at least one hash. Use the **+ Add another instance** button below for additional attachments.",
+      "id": "obj_attachment",
+      "label": "Attached file",
+      "mandatory": false,
+      "object_template": {
+        "minimum_version": 25,
+        "name": "file",
+        "uuid": "688c46fb-5edb-40a3-8273-1af7923e2215"
+      },
+      "parent": "s_attachments",
+      "relations": [
+        {
+          "help_override": "Original filename as it appeared in the attachment, including extension.",
+          "label_override": "Filename",
+          "mandatory": true,
+          "object_relation": "filename"
+        },
+        {
+          "help_override": "Strongly preferred — best for correlation across feeds.",
+          "label_override": "SHA-256",
+          "mandatory": false,
+          "object_relation": "sha256"
+        },
+        {
+          "help_override": "Legacy hash; capture if you have it but SHA-256 is preferred.",
+          "label_override": "MD5",
+          "mandatory": false,
+          "object_relation": "md5"
+        },
+        {
+          "help_override": "e.g. `application/pdf`, `application/zip`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`.",
+          "label_override": "MIME type",
+          "mandatory": false,
+          "object_relation": "mimetype"
+        }
+      ],
+      "repeatable": true,
+      "type": "object_field"
+    },
+    {
+      "comment": "Attachment of the spearphishing message",
+      "from": "obj_email",
+      "id": "ref_email_attachment",
+      "relationship_type": "contained-within",
+      "to": "obj_attachment",
+      "type": "object_reference"
+    },
+    {
+      "help": "Some spearphishes don't attach the payload — they link to it. Capture the link here.",
+      "id": "s_payload_url",
+      "label": "Payload URL",
+      "type": "section"
+    },
+    {
+      "help": "URL the message links to (whether the link is hidden behind a button, an image, or visible text). Defang on copy if your tooling requires.",
+      "id": "payload_url",
+      "label": "Linked URL",
+      "mandatory": false,
+      "misp": {
+        "category": "Payload delivery",
+        "to_ids_default": true,
+        "type": "url"
+      },
+      "parent": "s_payload_url",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "How sensitive is this report, and what do you suspect about provenance?",
+      "id": "s_classification",
+      "label": "Classification",
+      "type": "section"
+    },
+    {
+      "help": "Pick one. Override the default if the analyst's TLP differs from `tlp:amber`.",
+      "id": "tlp",
+      "label": "TLP",
+      "mandatory": true,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_taxonomies": [
+        "tlp"
+      ],
+      "type": "tag_field"
+    },
+    {
+      "help": "Optional — the phase(s) of the cyber kill chain this email represents. For most spearphishes, *delivery* applies; if a payload was opened, *exploitation* and *installation* may also.",
+      "id": "kill_chain",
+      "label": "Kill chain phase",
+      "mandatory": false,
+      "multiple": true,
+      "parent": "s_classification",
+      "restrict_taxonomies": [
+        "kill-chain"
+      ],
+      "type": "tag_field"
+    },
+    {
+      "help": "Optional — only fill in if your confidence is reasonable. Speculation here pollutes correlation.",
+      "id": "actor",
+      "label": "Suspected threat actor",
+      "mandatory": false,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_galaxy_types": [
+        "threat-actor"
+      ],
+      "type": "galaxy_field"
+    },
+    {
+      "content": "**A note on attribution:** if you're tempted to fill in *Suspected threat actor* based on a single TTP overlap, please don't. False attribution corrupts correlation across the whole sharing graph. Leave it blank unless you have multiple, independent indicators.",
+      "id": "note_attribution",
+      "type": "text_block"
+    }
+  ],
+  "uuid": "11d82511-c161-4154-8f06-b01bc8527c69"
+}

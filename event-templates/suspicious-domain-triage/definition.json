@@ -1,0 +1,264 @@
+{
+  "description": "First-pass triage of a domain flagged by detection tooling, a user report, or upstream feed. Capture the registration footprint, current DNS resolution, and any URLs observed underneath, so a reviewer can decide whether it warrants escalation.",
+  "event_defaults": {
+    "analysis": 0,
+    "distribution": 1,
+    "info_template": "Suspicious domain — {{field:domain}}",
+    "tags": [
+      {
+        "locked": false,
+        "name": "tlp:amber"
+      }
+    ],
+    "threat_level_id": 3
+  },
+  "library_metadata": {
+    "authors": [
+      {
+        "contact": "info@misp-project.org",
+        "name": "MISP Project"
+      }
+    ],
+    "compatible_misp_version": "2.5.0",
+    "tags": [
+      "incident-response",
+      "domain",
+      "triage",
+      "phishing",
+      "c2"
+    ]
+  },
+  "misp_default": true,
+  "name": "Suspicious domain triage",
+  "schema_version": 1,
+  "structure": [
+    {
+      "help": "The domain itself plus context for why it's being looked at.",
+      "id": "s_overview",
+      "label": "Overview",
+      "type": "section"
+    },
+    {
+      "help": "The bare domain (no scheme, no path). Use the punycode form for IDN — capture the visible Unicode form in the *Why suspicious* field below.",
+      "id": "domain",
+      "label": "Domain",
+      "mandatory": true,
+      "misp": {
+        "category": "Network activity",
+        "comment_template": "Triage subject",
+        "to_ids_default": true,
+        "type": "domain"
+      },
+      "parent": "s_overview",
+      "type": "attribute_field"
+    },
+    {
+      "help": "When you first encountered this domain. ISO 8601.",
+      "id": "date_observed",
+      "label": "Date observed",
+      "mandatory": true,
+      "misp": {
+        "category": "Other",
+        "type": "datetime"
+      },
+      "parent": "s_overview",
+      "type": "attribute_field"
+    },
+    {
+      "help": "Where this domain came to your attention — e.g. *DNS sinkhole alert*, *user report*, *URLhaus feed*, *brand-monitoring vendor X*.",
+      "id": "report_source",
+      "label": "Report source",
+      "mandatory": false,
+      "misp": {
+        "category": "Internal reference",
+        "type": "text"
+      },
+      "parent": "s_overview",
+      "type": "attribute_field"
+    },
+    {
+      "help": "Free-form Markdown — what makes the domain suspicious. Lookalike of a brand domain? Newly-registered? Hosting a phishing kit? Visible Unicode form (for IDNs)? Saved as an EventReport attached to the new event.",
+      "id": "why_suspicious",
+      "label": "Why suspicious",
+      "mandatory": false,
+      "parent": "s_overview",
+      "type": "event_report"
+    },
+    {
+      "help": "What the domain currently resolves to. Capture a snapshot — fast-flux operators may rotate the answer minute by minute.",
+      "id": "s_dns",
+      "label": "DNS resolution",
+      "type": "section"
+    },
+    {
+      "help": "Single domain-ip object grouping the domain with its observed resolution(s). Use the **+ Add another instance** below if the domain resolves to several distinct IPs.",
+      "id": "obj_domain_ip",
+      "label": "Domain → IP resolution",
+      "mandatory": false,
+      "object_template": {
+        "minimum_version": 11,
+        "name": "domain-ip",
+        "uuid": "43b3b146-77eb-4931-b4cc-b66c60f28734"
+      },
+      "parent": "s_dns",
+      "relations": [
+        {
+          "help_override": "Same value as the *Domain* field above.",
+          "label_override": "Domain",
+          "mandatory": true,
+          "object_relation": "domain"
+        },
+        {
+          "help_override": "What the domain resolved to at *first-seen* time.",
+          "label_override": "Observed IP",
+          "mandatory": true,
+          "object_relation": "ip"
+        },
+        {
+          "help_override": "Earliest known time of this domain → ip pair.",
+          "label_override": "First seen",
+          "mandatory": false,
+          "object_relation": "first-seen"
+        },
+        {
+          "help_override": "Most recent observation of this pair.",
+          "label_override": "Last seen",
+          "mandatory": false,
+          "object_relation": "last-seen"
+        }
+      ],
+      "repeatable": true,
+      "type": "object_field"
+    },
+    {
+      "help": "WHOIS data. Recently-registered domains and bulk-registered batches are strong triage signals.",
+      "id": "s_whois",
+      "label": "Registration footprint",
+      "type": "section"
+    },
+    {
+      "help": "Standard WHOIS fields. Most analysts only fill creation-date, registrar, and registrant-email at first triage; the full record can be appended later.",
+      "id": "obj_whois",
+      "label": "WHOIS",
+      "mandatory": false,
+      "object_template": {
+        "minimum_version": 10,
+        "name": "whois",
+        "uuid": "429faea1-34ff-47af-8a00-7c62d3be5a6a"
+      },
+      "parent": "s_whois",
+      "relations": [
+        {
+          "help_override": "Same value as the *Domain* field above.",
+          "label_override": "Domain",
+          "mandatory": true,
+          "object_relation": "domain"
+        },
+        {
+          "help_override": "Strong triage signal — domains <30 days old are common in phishing infrastructure.",
+          "label_override": "Creation date",
+          "mandatory": false,
+          "object_relation": "creation-date"
+        },
+        {
+          "help_override": "Some registrars are over-represented in abuse reporting.",
+          "label_override": "Registrar",
+          "mandatory": false,
+          "object_relation": "registrar"
+        },
+        {
+          "help_override": "When unprivacy-shielded, this often correlates with other domains in the same campaign.",
+          "label_override": "Registrant email",
+          "mandatory": false,
+          "object_relation": "registrant-email"
+        },
+        {
+          "label_override": "Name server",
+          "mandatory": false,
+          "object_relation": "nameserver"
+        }
+      ],
+      "type": "object_field"
+    },
+    {
+      "help": "URLs, paths, or content seen on the domain. Helpful both for evidence and for downstream URL-blocking.",
+      "id": "s_observed",
+      "label": "Observed under this domain",
+      "type": "section"
+    },
+    {
+      "help": "Full URL — captures the path component which is often the giveaway for phishing pages. One URL per entry; defang on copy if your tooling requires.",
+      "id": "observed_url",
+      "label": "Observed URL",
+      "mandatory": false,
+      "misp": {
+        "category": "Network activity",
+        "to_ids_default": true,
+        "type": "url"
+      },
+      "parent": "s_observed",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "If you have the JA3 of the TLS server hello — useful for identifying common phishing-kit hosting infrastructure.",
+      "id": "fingerprint_ja3",
+      "label": "TLS JA3 fingerprint",
+      "mandatory": false,
+      "misp": {
+        "category": "Network activity",
+        "type": "ja3-fingerprint-md5"
+      },
+      "parent": "s_observed",
+      "type": "attribute_field"
+    },
+    {
+      "help": "TLP, kill-chain phase, and any actor / brand attribution.",
+      "id": "s_classification",
+      "label": "Classification",
+      "type": "section"
+    },
+    {
+      "help": "Pick one. Override the default if the analyst's TLP differs.",
+      "id": "tlp",
+      "label": "TLP",
+      "mandatory": true,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_taxonomies": [
+        "tlp"
+      ],
+      "type": "tag_field"
+    },
+    {
+      "help": "Most often *delivery* or *command and control* depending on the domain's role.",
+      "id": "kill_chain",
+      "label": "Kill chain phase",
+      "mandatory": false,
+      "multiple": true,
+      "parent": "s_classification",
+      "restrict_taxonomies": [
+        "kill-chain"
+      ],
+      "type": "tag_field"
+    },
+    {
+      "help": "Optional. Speculation here pollutes correlation — leave blank unless multiple independent indicators support the attribution.",
+      "id": "threat_actor",
+      "label": "Suspected threat actor",
+      "mandatory": false,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_galaxy_types": [
+        "threat-actor"
+      ],
+      "type": "galaxy_field"
+    },
+    {
+      "content": "**A note on freshness:** DNS resolution and TLS fingerprints are point-in-time observations. If the domain is still active when this event is reviewed, re-pull the WHOIS and re-resolve before acting on the IPs — these change fast on adversary infrastructure.",
+      "id": "note_freshness",
+      "type": "text_block"
+    }
+  ],
+  "uuid": "420ebb51-952e-4059-9550-af95090434aa"
+}
