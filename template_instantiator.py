@@ -161,9 +161,10 @@ def _resolve_galaxy_value(galaxy_types: List[str], value: str) -> Optional[str]:
 def validate_user_input(definition: dict, values: dict) -> List[str]:
     """Return a list of human-readable validation errors (empty = valid).
 
-    Grown across Phase 3: this scaffold enforces unknown-id rejection and
-    mandatory-element presence; per-relation and restriction checks are added
-    with the object_field / tag_field / galaxy_field commits.
+    Enforces (PRD B17): unknown-id rejection; mandatory element and mandatory
+    object-relation presence; value shape per element type; repeatable /
+    single-select cardinality; and tag/galaxy selections staying within the
+    declared restrictions and present in bundled data.
     """
     errors: List[str] = []
     interactive = _interactive_elements(definition)
@@ -184,14 +185,39 @@ def validate_user_input(definition: dict, values: dict) -> List[str]:
         if not present:
             continue
 
-        # object_field: every relation flagged mandatory must be filled in each
-        # submitted instance.
-        if el.get("type") == "object_field":
+        etype = el.get("type")
+
+        # attribute_field: value must be a string or list of strings; a
+        # non-repeatable field rejects multiple values.
+        if etype == "attribute_field":
+            raw = values[eid]
+            if isinstance(raw, dict):
+                errors.append(f'attribute_field "{eid}": expected a string or list of strings')
+            elif isinstance(raw, list) and not el.get("repeatable") and len(_scalar_instances(raw)) > 1:
+                errors.append(f'attribute_field "{eid}" is not repeatable but received multiple values')
+
+        # object_field: value must be a relation→value map or a list of them; a
+        # non-repeatable field rejects multiple instances; every relation flagged
+        # mandatory must be filled in each submitted instance.
+        elif etype == "object_field":
+            raw = values[eid]
+            if isinstance(raw, dict):
+                instances = [raw]
+            elif isinstance(raw, list):
+                instances = raw
+            else:
+                errors.append(f'object_field "{eid}": expected a relation→value object or a list of them')
+                instances = []
+            non_empty = [i for i in instances if not _is_empty(i)]
+            if not el.get("repeatable") and len(non_empty) > 1:
+                errors.append(f'object_field "{eid}" is not repeatable but received {len(non_empty)} instances')
             mandatory_relations = [
                 r.get("object_relation") for r in (el.get("relations") or [])
                 if r.get("mandatory") and r.get("object_relation")
             ]
-            for idx, instance in enumerate(_object_instances(values[eid]), start=1):
+            for idx, instance in enumerate(instances, start=1):
+                if _is_empty(instance):
+                    continue
                 if not isinstance(instance, dict):
                     errors.append(f'object_field "{eid}" instance {idx}: expected a relation→value object')
                     continue
