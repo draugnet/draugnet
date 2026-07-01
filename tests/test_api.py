@@ -569,3 +569,189 @@ class TestOptionalMetadata:
         payload["optional"] = self.OPTIONAL
         r = http.post("/share/misp", json=payload)
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Event templates — Phase 2 (loader, listing, fetch, pickers)  [T1, T2, T3]
+#
+# These exercise the *filesystem* source (the shipped default). The MISP-pull
+# source shares the same loader/validation path and is covered by T9 in Phase 3,
+# once the Phase-1 exposed-listing endpoint is deployed to the dev MISP.
+# ---------------------------------------------------------------------------
+
+try:
+    import jsonschema as _jsonschema
+except ImportError:  # pragma: no cover
+    _jsonschema = None
+
+_REPO_ROOT   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TEMPLATE_DIR = os.path.join(_REPO_ROOT, "event-templates")
+_SCHEMA_FILE  = os.path.join(_REPO_ROOT, "schemas", "event-template-v1.schema.json")
+
+
+def _load_schema():
+    if not os.path.isfile(_SCHEMA_FILE):
+        return None
+    with open(_SCHEMA_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def invalid_fs_template():
+    """Drop a schema-invalid definition into the filesystem source, yield its
+    uuid, then remove it. Skips if the filesystem source dir is not present."""
+    if not os.path.isdir(_TEMPLATE_DIR):
+        pytest.skip("filesystem template dir not present (misp source?)")
+    bad_uuid = str(uuid.uuid4())
+    d = os.path.join(_TEMPLATE_DIR, "_pytest_invalid")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "definition.json"), "w", encoding="utf-8") as f:
+        # Missing the required event_defaults + structure → fails validation.
+        json.dump({"schema_version": 1, "uuid": bad_uuid, "name": "pytest invalid"}, f)
+    try:
+        yield bad_uuid
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ---- T1: GET /templates lists expected templates; invalid excluded ----------
+
+class TestEventTemplatesList:
+    def test_returns_200_list(self, http):
+        r = http.get("/templates")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_summary_shape(self, http):
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        for t in templates:
+            assert set(t.keys()) >= {"uuid", "name", "description", "tags"}
+            assert isinstance(t["tags"], list)
+            assert t["uuid"] and t["name"]
+
+    def test_listed_templates_fetch_and_validate(self, http):
+        schema = _load_schema()
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        for t in templates[:5]:
+            r = http.get(f"/templates/{t['uuid']}")
+            assert r.status_code == 200, r.text
+            defn = r.json()
+            assert defn["uuid"] == t["uuid"]
+            if schema is not None and _jsonschema is not None:
+                _jsonschema.Draft7Validator(schema).validate(defn)
+
+    def test_invalid_definition_excluded_from_listing(self, http, invalid_fs_template):
+        uuids = {t["uuid"] for t in http.get("/templates").json()}
+        assert invalid_fs_template not in uuids
+        # Found on disk but invalid → direct fetch is 422 (not 404, not 200).
+        r = http.get(f"/templates/{invalid_fs_template}")
+        assert r.status_code == 422
+
+
+# ---- T2: GET /templates/{uuid} returns schema-valid definition; traversal ---
+
+class TestEventTemplateFetch:
+    def test_fetch_valid_definition(self, http):
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        r = http.get(f"/templates/{templates[0]['uuid']}")
+        assert r.status_code == 200
+        defn = r.json()
+        assert "structure" in defn and "event_defaults" in defn
+
+    def test_fetched_definition_is_schema_valid(self, http):
+        schema = _load_schema()
+        if schema is None or _jsonschema is None:
+            pytest.skip("bundled schema or jsonschema not available")
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        defn = http.get(f"/templates/{templates[0]['uuid']}").json()
+        _jsonschema.Draft7Validator(schema).validate(defn)  # raises on invalid
+
+    def test_unknown_uuid_returns_404(self, http):
+        r = http.get(f"/templates/{uuid.uuid4()}")
+        assert r.status_code == 404
+
+    @pytest.mark.parametrize("bad", [
+        "not-a-uuid",
+        "..%2F..%2F..%2Fetc%2Fpasswd",
+        "%2e%2e%2f%2e%2e%2fsettings.py",
+        "12345",
+    ])
+    def test_path_traversal_and_bad_uuid_blocked(self, http, bad):
+        r = http.get(f"/templates/{bad}")
+        assert r.status_code in (400, 404), (bad, r.status_code, r.text)
+
+
+# ---- T3: taxonomy + galaxy pickers return bundled data; bounded; no MISP ----
+
+class TestTaxonomyPicker:
+    def test_tlp_entries(self, http):
+        r = http.get("/taxonomies", params={"ns": "tlp"})
+        assert r.status_code == 200
+        tags = {e["tag"] for e in r.json()["entries"]}
+        assert "tlp:amber" in tags
+        assert "tlp:red" in tags
+
+    def test_kill_chain_entries(self, http):
+        r = http.get("/taxonomies", params={"ns": "kill-chain"})
+        assert r.status_code == 200
+        assert len(r.json()["entries"]) > 0
+
+    def test_unknown_namespace_is_empty_not_error(self, http):
+        r = http.get("/taxonomies", params={"ns": "this-namespace-does-not-exist-xyz"})
+        assert r.status_code == 200
+        assert r.json()["entries"] == []
+
+    def test_invalid_namespace_rejected(self, http):
+        r = http.get("/taxonomies", params={"ns": "../../etc"})
+        assert r.status_code == 400
+
+    def test_missing_ns_returns_422(self, http):
+        r = http.get("/taxonomies")
+        assert r.status_code == 422
+
+
+class TestGalaxyPicker:
+    def test_threat_actor_search(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "q": "apt"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] > 0
+        values = {x["value"] for x in body["results"]}
+        assert "APT1" in values
+        for x in body["results"]:
+            assert x["tag"].startswith('misp-galaxy:threat-actor="')
+
+    def test_results_are_bounded(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "q": "a", "limit": 5})
+        assert r.status_code == 200
+        assert r.json()["count"] <= 5
+
+    def test_synonym_search(self, http):
+        # APT1 carries the synonym "Comment Crew".
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "q": "comment crew"})
+        assert r.status_code == 200
+        assert any(x["value"] == "APT1" for x in r.json()["results"])
+
+    def test_unknown_type_is_empty_not_error(self, http):
+        # "never error if MISP galaxy data differs" — an unknown/absent type must
+        # return an empty result, not a 5xx.
+        r = http.get("/galaxy_clusters", params={"type": "this-galaxy-does-not-exist-xyz", "q": "x"})
+        assert r.status_code == 200
+        assert r.json()["results"] == []
+
+    def test_invalid_type_rejected(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "../../etc/passwd"})
+        assert r.status_code == 400
+
+    def test_over_limit_rejected(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "limit": 9999})
+        assert r.status_code == 422
