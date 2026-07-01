@@ -755,3 +755,318 @@ class TestGalaxyPicker:
     def test_over_limit_rejected(self, http):
         r = http.get("/galaxy_clusters", params={"type": "threat-actor", "limit": 9999})
         assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Event templates — Phase 3 (instantiation engine)  [T4, T5, T6, T8, T9]
+#
+# These submit via POST /share/template and then retrieve the resulting MISP
+# event to assert its structure. They use the shipped "Spearphishing email
+# triage" template (filesystem source), which exercises every non-file element
+# type: attribute_field, object_field, object_reference, tag_field,
+# galaxy_field, section/text_block, plus event_defaults. file_field and the
+# event_report *element* land in Phase 4 (T7).
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+
+_SPEARPHISH_NAME = "Spearphishing email triage"
+
+
+def _find_template_uuid(http, name):
+    r = http.get("/templates")
+    if r.status_code != 200:
+        return None
+    for t in r.json():
+        if t.get("name") == name:
+            return t.get("uuid")
+    return None
+
+
+def _submit_template(http, template_uuid, values, optional=None):
+    body = {"template_uuid": template_uuid, "values": values}
+    if optional is not None:
+        body["optional"] = optional
+    return http.post("/share/template", json=body)
+
+
+def _retrieve_event(http, token):
+    """Retrieve a token's MISP event as the inner Event dict."""
+    r = http.get(f"/retrieve?token={token}&format=json")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert isinstance(data, list) and data, f"unexpected /retrieve shape: {data!r}"
+    return data[0]["Event"]
+
+
+def _attrs_by_value(event):
+    out = {}
+    for a in event.get("Attribute", []):
+        out.setdefault(a["value"], a)
+    return out
+
+
+def _spearphish_full_values():
+    """A rich submission touching every element type in the spearphishing template."""
+    return {
+        "sender": "attacker@evil.example",
+        "envelope_sender": "bounce@evil.example",
+        "subject": "Your invoice is overdue",
+        "received_from_ip": "203.0.113.9",
+        "payload_url": ["http://bad.example/a", "http://bad.example/b"],
+        "obj_email": {
+            "from": "attacker@evil.example",
+            "subject": "Your invoice is overdue",
+            "message-id": "<deadbeef@evil.example>",
+            "reply-to": "totally-legit@evil.example",
+        },
+        "obj_attachment": [
+            {"filename": "invoice.pdf.exe", "sha256": "a" * 64},
+            {"filename": "payload.zip", "sha256": "b" * 64},
+        ],
+        "tlp": "tlp:amber",
+        "kill_chain": ["kill-chain:Delivery", "kill-chain:Exploitation"],
+        "actor": "APT28",
+    }
+
+
+@pytest.fixture(scope="module")
+def spearphish_uuid(http):
+    u = _find_template_uuid(http, _SPEARPHISH_NAME)
+    if not u:
+        pytest.skip(f"template '{_SPEARPHISH_NAME}' not available in the active source")
+    return u
+
+
+@pytest.fixture(scope="module")
+def happy_event(http, spearphish_uuid):
+    """Submit the full spearphishing payload once and return the resulting event."""
+    r = _submit_template(http, spearphish_uuid, _spearphish_full_values())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok" and body.get("token")
+    return _retrieve_event(http, body["token"])
+
+
+# ---- T4: happy path per element type ----------------------------------------
+
+class TestTemplateHappyPath:
+    def test_event_defaults_and_info_substitution(self, happy_event):
+        assert happy_event["info"].startswith("Spearphishing")
+        assert "attacker@evil.example" in happy_event["info"]   # {{field:sender}}
+        assert int(happy_event["distribution"]) == 1
+        assert int(happy_event["threat_level_id"]) == 2
+        assert int(happy_event["analysis"]) == 0
+
+    def test_attribute_fields(self, happy_event):
+        by_val = _attrs_by_value(happy_event)
+        sender = by_val.get("attacker@evil.example")
+        assert sender is not None
+        assert sender["type"] == "email-src"
+        assert sender["category"] == "Payload delivery"
+        assert sender["to_ids"] in (True, 1, "1")
+        assert sender.get("comment") == "From: header"
+        subj = by_val.get("Your invoice is overdue")
+        assert subj is not None and subj["type"] == "email-subject"
+        assert by_val.get("203.0.113.9", {}).get("type") == "ip-src"
+        urls = {a["value"] for a in happy_event.get("Attribute", []) if a["type"] == "url"}
+        assert urls >= {"http://bad.example/a", "http://bad.example/b"}
+
+    def test_object_fields(self, happy_event):
+        objs = happy_event.get("Object", [])
+        emails = [o for o in objs if o["name"] == "email"]
+        files = [o for o in objs if o["name"] == "file"]
+        assert len(emails) == 1
+        assert len(files) == 2
+        email_rels = {a["object_relation"]: a["value"] for a in emails[0].get("Attribute", [])}
+        assert email_rels.get("from") == "attacker@evil.example"
+        assert email_rels.get("subject") == "Your invoice is overdue"
+        assert "message-id" in email_rels
+        filenames = {
+            a["value"] for o in files for a in o.get("Attribute", [])
+            if a["object_relation"] == "filename"
+        }
+        assert filenames == {"invoice.pdf.exe", "payload.zip"}
+
+    def test_object_references(self, happy_event):
+        objs = happy_event.get("Object", [])
+        email = next(o for o in objs if o["name"] == "email")
+        file_uuids = {o["uuid"] for o in objs if o["name"] == "file"}
+        refs = email.get("ObjectReference", [])
+        # Per-target-instance rule: one reference per attachment object.
+        assert len(refs) == 2
+        for ref in refs:
+            assert ref["relationship_type"] == "contained-within"
+            assert ref["referenced_uuid"] in file_uuids
+
+    def test_event_tags(self, happy_event):
+        names = {t["name"] for t in happy_event.get("Tag", [])}
+        assert "source:draugnet" in names                      # pipeline preserved
+        assert "tlp:amber" in names                            # default + user tag_field
+        assert "kill-chain:Delivery" in names                  # multi tag_field
+        assert "kill-chain:Exploitation" in names
+        assert 'misp-galaxy:threat-actor="APT28"' in names     # galaxy_field
+
+
+# ---- T5: mandatory enforcement (nothing pushed / no token) ------------------
+
+class TestTemplateMandatory:
+    def test_missing_mandatory_attribute_field(self, http, spearphish_uuid):
+        vals = _spearphish_full_values()
+        del vals["sender"]  # mandatory
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+    def test_missing_mandatory_object_relation(self, http, spearphish_uuid):
+        vals = {
+            "sender": "a@evil.example", "subject": "h", "tlp": "tlp:amber",
+            "obj_email": {"subject": "h"},  # missing mandatory 'from'
+        }
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 400, r.text
+        assert "from" in json.dumps(r.json().get("detail"))
+
+    def test_empty_submission_lists_missing_mandatories(self, http, spearphish_uuid):
+        r = _submit_template(http, spearphish_uuid, {})
+        assert r.status_code == 400
+        assert "token" not in r.json()
+
+
+# ---- T6: repeatable attributes/objects → multiple instances -----------------
+
+class TestTemplateRepeatable:
+    def test_repeatable_attributes_and_objects(self, http, spearphish_uuid):
+        vals = {
+            "sender": "a@evil.example", "subject": "h", "tlp": "tlp:amber",
+            "payload_url": ["http://a/", "http://b/", "http://c/"],
+            "obj_attachment": [
+                {"filename": "1.bin", "sha256": "1" * 64},
+                {"filename": "2.bin", "sha256": "2" * 64},
+            ],
+        }
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        urls = [a for a in event.get("Attribute", []) if a["type"] == "url"]
+        assert len(urls) == 3
+        files = [o for o in event.get("Object", []) if o["name"] == "file"]
+        assert len(files) == 2
+
+
+# ---- T8: hybrid metadata + locked tags + substitution -----------------------
+
+class TestTemplateHybridMetadata:
+    def test_hybrid_metadata_and_locked_default_tag(self, http, spearphish_uuid):
+        optional = {
+            "pap": "PAP:RED",
+            "submitter": "analyst-jane",
+            "description": "SOC tier-1 escalation.",
+        }
+        vals = {"sender": "attacker@evil.example", "subject": "Overdue invoice", "tlp": "tlp:amber"}
+        r = _submit_template(http, spearphish_uuid, vals, optional)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        names = {t["name"] for t in event.get("Tag", [])}
+        assert "PAP:RED" in names
+        assert "submitter:analyst-jane" in names
+        assert "tlp:amber" in names  # locked default tag present alongside metadata
+        report_names = {rep["name"] for rep in event.get("EventReport", [])}
+        assert "Additional report description" in report_names
+
+    def test_info_field_substitution(self, http, spearphish_uuid):
+        import datetime
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        vals = {"sender": "pat@victim.example", "subject": "x", "tlp": "tlp:amber"}
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        assert today in event["info"]                 # {{date}}
+        assert "pat@victim.example" in event["info"]   # {{field:sender}}
+
+
+class TestInfoTemplateSubstitution:
+    """Unit coverage of render_info_template, including {{user}} — no shipped
+    template uses {{user}}, so it can't be exercised through the API path."""
+
+    def test_all_substitution_forms(self):
+        import datetime
+        import template_instantiator as ti
+        out = ti.render_info_template(
+            "d={{date}} u={{user}} f={{field:sender}}",
+            {"sender": "who@x.y"},
+            user="reporter@corp.example",
+        )
+        assert f"d={datetime.date.today().strftime('%Y-%m-%d')}" in out
+        assert "u=reporter@corp.example" in out
+        assert "f=who@x.y" in out
+
+    def test_user_empty_when_no_submitter(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("[{{user}}]", {}, user="") == "[]"
+
+    def test_field_repeatable_uses_first_value(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("{{field:x}}", {"x": ["one", "two"]}) == "one"
+
+    def test_object_field_not_projected_into_info(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("[{{field:obj}}]", {"obj": {"a": "b"}}) == "[]"
+
+    def test_missing_field_is_blank(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("[{{field:nope}}]", {}) == "[]"
+
+
+# ---- T9: MISP-source (exposed-listing) pull contract  [M3] ------------------
+#
+# The full source switch (template_source = "misp") is an operator step
+# (config + restart). This asserts the coupling point the misp source consumes —
+# GET /event_templates/exposed on the connected MISP — and that the loader can
+# extract + schema-validate each exposed definition. Skips cleanly when the
+# Phase-1 endpoint isn't deployed (404) or no template is flagged exposed yet.
+
+class TestMispSourcePullContract:
+    def test_exposed_listing_definitions_are_valid(self):
+        try:
+            from config.settings import misp_config
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"backend config not importable: {e}")
+        url = misp_config["url"].rstrip("/") + "/event_templates/exposed"
+        headers = {"Authorization": misp_config["key"], "Accept": "application/json"}
+        try:
+            resp = httpx.get(
+                url, headers=headers,
+                verify=misp_config.get("verifycert", True), timeout=15,
+            )
+        except Exception as e:
+            pytest.skip(f"MISP not reachable for exposed-listing contract: {e}")
+        if resp.status_code == 404:
+            pytest.skip("Phase-1 /event_templates/exposed not deployed on this MISP")
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        assert isinstance(rows, list)
+        if not rows:
+            pytest.skip("no event templates flagged exposed on this MISP")
+
+        import template_loader
+        for row in rows:
+            defn = template_loader._extract_definition(row)
+            assert isinstance(defn, dict), f"exposed row missing usable definition: {row!r}"
+            ok, reason = template_loader.validate_definition(defn)
+            assert ok, f"exposed definition failed schema validation: {reason}"
+
+    def test_backend_lists_exposed_when_source_is_misp(self, http):
+        """If the backend is actually configured for the misp source, its
+        /templates listing must serve the exposed definitions (end-to-end T9)."""
+        try:
+            from config.settings import template_config
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"backend config not importable: {e}")
+        if (template_config or {}).get("source") != "misp":
+            pytest.skip("backend template source is not 'misp' (filesystem default)")
+        r = http.get("/templates")
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
