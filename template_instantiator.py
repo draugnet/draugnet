@@ -243,6 +243,39 @@ def _build_objects(event: MISPEvent, definition: dict, values: dict) -> Dict[str
     return instances_by_id
 
 
+def _build_object_references(
+    definition: dict, object_instances: Dict[str, List[MISPObject]], warnings: List[str]
+) -> None:
+    """object_reference → add references once all objects exist.
+
+    Repeatable-target rule (PRD B15): one reference per resulting *target*
+    instance. The first instance of ``from`` is linked to every instance of
+    ``to`` — so, e.g., one email object references each of several attachment
+    objects. If either endpoint was left unfilled the reference is skipped with
+    a warning (never a hard failure).
+    """
+    for el in definition.get("structure") or []:
+        if not isinstance(el, dict) or el.get("type") != "object_reference":
+            continue
+        frm = el.get("from")
+        to = el.get("to")
+        rel_type = el.get("relationship_type")
+        comment = el.get("comment") or ""
+        if not frm or not to or not rel_type:
+            continue
+        from_objs = object_instances.get(frm) or []
+        to_objs = object_instances.get(to) or []
+        if not from_objs or not to_objs:
+            warnings.append(
+                f'object_reference "{el.get("id")}" skipped: '
+                f'"{frm}" or "{to}" has no instantiated object'
+            )
+            continue
+        source = from_objs[0]
+        for target in to_objs:
+            source.add_reference(target.uuid, rel_type, comment=comment)
+
+
 def build_event(definition: dict, values: dict, optional: Optional[dict] = None) -> MISPEvent:
     """Build an in-memory MISPEvent from a template definition + reporter values.
 
@@ -265,6 +298,7 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
 
     _build_attributes(event, definition, values)
     object_instances = _build_objects(event, definition, values)
+    _build_object_references(definition, object_instances, warnings)
 
     if warnings:
         for w in warnings:
