@@ -28,7 +28,9 @@ handled in Phase 3).
 """
 from __future__ import annotations
 
+import re
 import logging
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -38,6 +40,11 @@ from utils import create_misp_event, add_optional_form_data
 import template_data
 
 logger = logging.getLogger('uvicorn.error')
+
+# The four substitution forms permitted in event_defaults.info_template
+# (PRD §7.1); the template grammar is guaranteed by the bundled schema, so by
+# render time we can trust it.
+_INFO_TEMPLATE_RE = re.compile(r'\{\{(date|now|user|field:([a-zA-Z_][a-zA-Z0-9_]*))\}\}')
 
 # Element types that carry no reporter-submitted data (UI-only or resolved from
 # other elements). They are never expected as keys in ``values``.
@@ -363,6 +370,107 @@ def _build_field_tags(event: MISPEvent, definition: dict, values: dict, seen: se
                     _add_event_tag(event, tag, seen)
 
 
+def _flatten_field_values(values: dict) -> Dict[str, Any]:
+    """Project reporter values to what ``{{field:<id>}}`` can reference: scalar
+    or list-of-scalar field values. object_field maps (dict / list-of-dict) have
+    no scalar projection and are dropped (mirrors the MISP info renderer)."""
+    flat: Dict[str, Any] = {}
+    for key, value in values.items():
+        if isinstance(value, dict):
+            continue
+        if isinstance(value, list):
+            if value and not all(isinstance(item, (str, int, float)) or item is None for item in value):
+                continue  # list of object maps
+        flat[key] = value
+    return flat
+
+
+def render_info_template(template_str: Optional[str], values: dict, user: str = "") -> str:
+    """Substitute ``{{date}}/{{now}}/{{user}}/{{field:<id>}}`` in an info_template
+    (PRD §7.1, parity with EventTemplateInfoRenderer.php). ``{{user}}`` resolves
+    to the reporter's ``submitter`` value or an empty string (A1)."""
+    if not isinstance(template_str, str) or template_str == "":
+        return ""
+    flat = _flatten_field_values(values)
+
+    def _sub(m: "re.Match") -> str:
+        expr = m.group(1)
+        if expr == "date":
+            return date.today().strftime("%Y-%m-%d")
+        if expr == "now":
+            return datetime.now().astimezone().isoformat()
+        if expr == "user":
+            return user or ""
+        field_id = m.group(2)
+        if field_id is None or field_id not in flat:
+            return ""
+        val = flat[field_id]
+        if val is None:
+            return ""
+        if isinstance(val, list):
+            return str(val[0]) if val else ""
+        return str(val)
+
+    return _INFO_TEMPLATE_RE.sub(_sub, template_str)
+
+
+def _apply_event_defaults(
+    event: MISPEvent, defaults: dict, values: dict, optional: dict, seen_tags: set, warnings: List[str]
+) -> None:
+    """Apply the template's event_defaults onto the baseline event: substituted
+    ``info``, distribution (with the A5 sharing-group fallback), threat level,
+    analysis, locked/unlocked default tags, and default galaxy_clusters resolved
+    through bundled data (A6 skip-with-warning)."""
+    info_template = defaults.get("info_template")
+    if isinstance(info_template, str) and info_template.strip():
+        user = str(optional.get("submitter") or "").strip()
+        rendered = render_info_template(info_template, values, user)
+        if rendered.strip():
+            event.info = rendered
+
+    if defaults.get("distribution") is not None:
+        dist = int(defaults["distribution"])
+        if dist == 4:
+            sg = defaults.get("sharing_group_id")
+            if sg is not None and int(sg) >= 1:
+                event.distribution = 4
+                event.sharing_group_id = int(sg)
+            else:
+                # Sharing-group ids aren't portable across instances (A5).
+                warnings.append(
+                    "event_defaults.distribution is 4 but no resolvable sharing_group_id; "
+                    "falling back to distribution 0"
+                )
+                event.distribution = 0
+        else:
+            event.distribution = dist
+
+    if defaults.get("threat_level_id") is not None:
+        event.threat_level_id = int(defaults["threat_level_id"])
+    if defaults.get("analysis") is not None:
+        event.analysis = int(defaults["analysis"])
+
+    # Default tags (the UI locks the ones marked locked; server-side both are
+    # applied identically).
+    for tag in defaults.get("tags") or []:
+        if isinstance(tag, dict):
+            _add_event_tag(event, tag.get("name"), seen_tags)
+
+    # Default galaxy clusters → misp-galaxy tags, resolved via bundled data only.
+    for gc in defaults.get("galaxy_clusters") or []:
+        if not isinstance(gc, dict):
+            continue
+        gtype = gc.get("galaxy_type")
+        gvalue = gc.get("value")
+        resolved = template_data.resolve_galaxy_cluster(gtype, gvalue) if gtype and gvalue else None
+        if resolved:
+            _add_event_tag(event, resolved["tag"], seen_tags)
+        else:
+            warnings.append(
+                f'event_defaults galaxy cluster {gtype}="{gvalue}" not in bundled data; skipped'
+            )
+
+
 def build_event(definition: dict, values: dict, optional: Optional[dict] = None) -> MISPEvent:
     """Build an in-memory MISPEvent from a template definition + reporter values.
 
@@ -382,12 +490,15 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     # Baseline event carries Draugnet's identity (source:draugnet tag) and the
     # default distribution/analysis/threat that event_defaults may override.
     event = create_misp_event()
+    seen_tags = _seen_event_tags(event)
+
+    _apply_event_defaults(
+        event, definition.get("event_defaults") or {}, values, optional, seen_tags, warnings
+    )
 
     _build_attributes(event, definition, values)
     object_instances = _build_objects(event, definition, values)
     _build_object_references(definition, object_instances, warnings)
-
-    seen_tags = _seen_event_tags(event)
     _build_field_tags(event, definition, values, seen_tags)
 
     if warnings:
