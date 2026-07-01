@@ -113,6 +113,40 @@ def _add_event_tag(event: MISPEvent, name: Optional[str], seen: set) -> None:
     seen.add(name)
 
 
+def _seen_event_tags(event: MISPEvent) -> set:
+    """Names of tags already on the event (e.g. source:draugnet)."""
+    seen = set()
+    for tag in (event.tags or []):
+        name = getattr(tag, "name", None)
+        if name:
+            seen.add(name)
+    return seen
+
+
+def _allowed_taxonomy_tags(namespaces: List[str]) -> Optional[set]:
+    """Set of permitted machine tags across the restricted namespaces, resolved
+    from bundled misp-taxonomies. Returns ``None`` when the field declares no
+    restriction (any tag accepted)."""
+    if not namespaces:
+        return None
+    allowed: set = set()
+    for ns in namespaces:
+        for entry in template_data.taxonomy_entries(ns):
+            allowed.add(entry["tag"])
+    return allowed
+
+
+def _resolve_galaxy_value(galaxy_types: List[str], value: str) -> Optional[str]:
+    """Resolve a chosen cluster value against the first matching bundled galaxy
+    type; returns its ``misp-galaxy:<type>="<value>"`` tag, or ``None`` if the
+    value isn't present in bundled data."""
+    for gtype in galaxy_types or []:
+        resolved = template_data.resolve_galaxy_cluster(gtype, value)
+        if resolved:
+            return resolved["tag"]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -159,6 +193,34 @@ def validate_user_input(definition: dict, values: dict) -> List[str]:
                         errors.append(
                             f'object_field "{eid}" instance {idx}: mandatory relation "{rel}" is empty'
                         )
+
+        # tag_field: selections must stay within restrict_taxonomies and be
+        # present in bundled data; single-select fields reject multiple values.
+        elif el.get("type") == "tag_field":
+            selections = _scalar_instances(values[eid])
+            if not el.get("multiple") and len(selections) > 1:
+                errors.append(f'tag_field "{eid}" is single-select but received {len(selections)} values')
+            allowed = _allowed_taxonomy_tags(el.get("restrict_taxonomies") or [])
+            if allowed is not None:
+                for name in selections:
+                    if str(name) not in allowed:
+                        errors.append(
+                            f'tag_field "{eid}": "{name}" is not permitted by restrict_taxonomies '
+                            f'or not present in bundled data'
+                        )
+
+        # galaxy_field: selections must resolve within restrict_galaxy_types
+        # against bundled misp-galaxy; single-select fields reject multiples.
+        elif el.get("type") == "galaxy_field":
+            gtypes = el.get("restrict_galaxy_types") or []
+            selections = _scalar_instances(values[eid])
+            if not el.get("multiple") and len(selections) > 1:
+                errors.append(f'galaxy_field "{eid}" is single-select but received {len(selections)} values')
+            for value in selections:
+                if _resolve_galaxy_value(gtypes, str(value)) is None:
+                    errors.append(
+                        f'galaxy_field "{eid}": cluster "{value}" not found in bundled data for {gtypes}'
+                    )
 
     return errors
 
@@ -276,6 +338,31 @@ def _build_object_references(
             source.add_reference(target.uuid, rel_type, comment=comment)
 
 
+def _build_field_tags(event: MISPEvent, definition: dict, values: dict, seen: set) -> None:
+    """tag_field / galaxy_field reporter selections → event tags.
+
+    Selections are already restriction- and bundled-presence-checked in
+    validate_user_input; tag_field values are applied verbatim, galaxy_field
+    values are resolved to their ``misp-galaxy:<type>="<value>"`` tag.
+    """
+    for el in definition.get("structure") or []:
+        if not isinstance(el, dict):
+            continue
+        etype = el.get("type")
+        eid = el.get("id")
+        if eid is None or eid not in values or _is_empty(values[eid]):
+            continue
+        if etype == "tag_field":
+            for name in _scalar_instances(values[eid]):
+                _add_event_tag(event, str(name), seen)
+        elif etype == "galaxy_field":
+            gtypes = el.get("restrict_galaxy_types") or []
+            for value in _scalar_instances(values[eid]):
+                tag = _resolve_galaxy_value(gtypes, str(value))
+                if tag:
+                    _add_event_tag(event, tag, seen)
+
+
 def build_event(definition: dict, values: dict, optional: Optional[dict] = None) -> MISPEvent:
     """Build an in-memory MISPEvent from a template definition + reporter values.
 
@@ -299,6 +386,9 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     _build_attributes(event, definition, values)
     object_instances = _build_objects(event, definition, values)
     _build_object_references(definition, object_instances, warnings)
+
+    seen_tags = _seen_event_tags(event)
+    _build_field_tags(event, definition, values, seen_tags)
 
     if warnings:
         for w in warnings:
