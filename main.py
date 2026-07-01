@@ -15,6 +15,7 @@ import io
 
 from utils import *
 import template_loader
+import template_data
 
 if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -593,6 +594,36 @@ async def get_event_template(uuid: str):
     except Exception as e:
         logger.error("Failed to fetch event template '%s': %s", uuid, e)
         raise HTTPException(status_code=500, detail="Failed to fetch event template.")
+
+
+@app.get("/taxonomies")
+async def get_taxonomy_entries(
+    ns: str = Query(..., description="Taxonomy namespace, e.g. 'tlp' or 'kill-chain'")
+):
+    """Selectable machine tags for a taxonomy namespace, from the bundled
+    misp-taxonomies submodule only (PRD B11). Restricted server-side to the
+    requested namespace; never fetched live from MISP.
+    """
+    if not template_data.is_safe_bundled_name(ns):
+        raise HTTPException(status_code=400, detail="Invalid taxonomy namespace.")
+    # Unknown namespaces return an empty entry list rather than erroring, so the
+    # picker stays resilient for an anonymous-facing form.
+    return {"namespace": ns, "entries": template_data.taxonomy_entries(ns)}
+
+
+@app.get("/galaxy_clusters")
+async def get_galaxy_clusters(
+    galaxy_type: str = Query(..., alias="type", description="Galaxy type / cluster file name, e.g. 'threat-actor'"),
+    q: str = Query("", description="Typeahead query (matches cluster value or synonym)"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum number of results"),
+):
+    """Typeahead search of a galaxy's clusters, lazy-loaded from the bundled
+    misp-galaxy submodule only (PRD B12). Bounded results; never touches MISP.
+    """
+    if not template_data.is_safe_bundled_name(galaxy_type):
+        raise HTTPException(status_code=400, detail="Invalid galaxy type.")
+    results = template_data.search_galaxy_clusters(galaxy_type, q, limit=limit)
+    return {"type": galaxy_type, "query": q, "count": len(results), "results": results}
 
 if __name__ == "__main__":
     if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
