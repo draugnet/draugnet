@@ -133,10 +133,32 @@ def validate_user_input(definition: dict, values: dict) -> List[str]:
         if key not in interactive:
             errors.append(f'unknown field id in user input: {key}')
 
-    # Mandatory elements must be present and non-empty.
     for eid, el in interactive.items():
-        if el.get("mandatory") and (eid not in values or _is_empty(values[eid])):
+        present = eid in values and not _is_empty(values[eid])
+
+        # Mandatory elements must be present and non-empty.
+        if el.get("mandatory") and not present:
             errors.append(f'mandatory field "{eid}" is empty')
+            continue
+        if not present:
+            continue
+
+        # object_field: every relation flagged mandatory must be filled in each
+        # submitted instance.
+        if el.get("type") == "object_field":
+            mandatory_relations = [
+                r.get("object_relation") for r in (el.get("relations") or [])
+                if r.get("mandatory") and r.get("object_relation")
+            ]
+            for idx, instance in enumerate(_object_instances(values[eid]), start=1):
+                if not isinstance(instance, dict):
+                    errors.append(f'object_field "{eid}" instance {idx}: expected a relation→value object')
+                    continue
+                for rel in mandatory_relations:
+                    if rel not in instance or _is_empty(instance.get(rel)):
+                        errors.append(
+                            f'object_field "{eid}" instance {idx}: mandatory relation "{rel}" is empty'
+                        )
 
     return errors
 
@@ -170,6 +192,57 @@ def _build_attributes(event: MISPEvent, definition: dict, values: dict) -> None:
             )
 
 
+def _build_objects(event: MISPEvent, definition: dict, values: dict) -> Dict[str, List[MISPObject]]:
+    """object_field → one MISPObject(name) per submitted instance.
+
+    Relation values come from the submitted instance map; the element's
+    relation-level ``default_value`` fills any relation the reporter left blank
+    (``hidden`` relations aren't shown in the form but their defaults still
+    apply). A relation value may itself be a list (multiple attributes for one
+    relation). PyMISP resolves each relation's type/category from the bundled
+    object template. Returns ``{element_id: [MISPObject, ...]}`` for
+    object_reference resolution.
+    """
+    instances_by_id: Dict[str, List[MISPObject]] = {}
+    for el in definition.get("structure") or []:
+        if not isinstance(el, dict) or el.get("type") != "object_field":
+            continue
+        eid = el.get("id")
+        if eid is None or eid not in values or _is_empty(values[eid]):
+            continue
+        oname = (el.get("object_template") or {}).get("name")
+        default_map: Dict[str, Any] = {}
+        for r in el.get("relations") or []:
+            rel = r.get("object_relation")
+            dv = r.get("default_value")
+            if rel and dv not in (None, ""):
+                default_map[rel] = dv
+
+        built: List[MISPObject] = []
+        for instance in _object_instances(values[eid]):
+            merged = dict(default_map)
+            for rel, rel_value in instance.items():
+                if not _is_empty(rel_value):
+                    merged[rel] = rel_value
+            if not merged:
+                continue
+            try:
+                misp_object = MISPObject(oname)
+                for rel, rel_value in merged.items():
+                    for value in _scalar_instances(rel_value):
+                        misp_object.add_attribute(rel, value=str(value), distribution=5)
+            except Exception as e:
+                logger.error("Failed to build object '%s' for field '%s': %s", oname, eid, e)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not build object for field '{eid}': {e}",
+                )
+            event.add_object(misp_object)
+            built.append(misp_object)
+        instances_by_id[eid] = built
+    return instances_by_id
+
+
 def build_event(definition: dict, values: dict, optional: Optional[dict] = None) -> MISPEvent:
     """Build an in-memory MISPEvent from a template definition + reporter values.
 
@@ -191,6 +264,7 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     event = create_misp_event()
 
     _build_attributes(event, definition, values)
+    object_instances = _build_objects(event, definition, values)
 
     if warnings:
         for w in warnings:
