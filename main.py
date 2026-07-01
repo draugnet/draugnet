@@ -14,6 +14,7 @@ import csv
 import io
 
 from utils import *
+import template_loader
 
 if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -561,6 +562,37 @@ async def get_object_template(
     except Exception as e:
         logger.error("Failed to list templates: %s", e)
         raise HTTPException(status_code=500, detail="Failed to list templates.")
+
+
+@app.get("/templates")
+async def list_event_templates():
+    """List available event templates for the configured source (PRD B8).
+
+    Returns an array of ``{uuid, name, description, tags}`` summaries; invalid
+    definitions are excluded.
+    """
+    try:
+        return await template_loader.list_templates()
+    except Exception as e:
+        logger.error("Failed to list event templates: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list event templates.")
+
+
+@app.get("/templates/{uuid}")
+async def get_event_template(uuid: str):
+    """Return the full definition for an event template by uuid (PRD B9)."""
+    try:
+        definition = await template_loader.get_template(uuid)
+        return JSONResponse(content=definition)
+    except template_loader.TemplateNotFound:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    except template_loader.TemplateInvalid as e:
+        raise HTTPException(status_code=422, detail=f"Invalid template definition: {e.reason}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to fetch event template '%s': %s", uuid, e)
+        raise HTTPException(status_code=500, detail="Failed to fetch event template.")
 
 if __name__ == "__main__":
     if draugnet_config.get("ssl_cert_path") and draugnet_config.get("ssl_key_path"):
