@@ -145,6 +145,31 @@ def validate_user_input(definition: dict, values: dict) -> List[str]:
 # Event construction
 # ---------------------------------------------------------------------------
 
+def _build_attributes(event: MISPEvent, definition: dict, values: dict) -> None:
+    """attribute_field → one MISPAttribute per submitted value.
+
+    ``section`` and ``text_block`` carry no data (UI-only) and are ignored.
+    ``default_value`` is a UI prefill only — an unfilled attribute_field creates
+    nothing server-side (mirrors EventTemplateInstantiator::buildAttributes).
+    """
+    for el in definition.get("structure") or []:
+        if not isinstance(el, dict) or el.get("type") != "attribute_field":
+            continue
+        eid = el.get("id")
+        if eid is None or eid not in values or _is_empty(values[eid]):
+            continue
+        misp = el.get("misp") or {}
+        atype = misp.get("type")
+        category = misp.get("category")
+        to_ids = bool(misp["to_ids_default"]) if "to_ids_default" in misp else True
+        comment = misp.get("comment_template") or ""
+        for value in _scalar_instances(values[eid]):
+            event.add_attribute(
+                atype, str(value),
+                category=category, to_ids=to_ids, comment=comment, distribution=5,
+            )
+
+
 def build_event(definition: dict, values: dict, optional: Optional[dict] = None) -> MISPEvent:
     """Build an in-memory MISPEvent from a template definition + reporter values.
 
@@ -164,6 +189,8 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     # Baseline event carries Draugnet's identity (source:draugnet tag) and the
     # default distribution/analysis/threat that event_defaults may override.
     event = create_misp_event()
+
+    _build_attributes(event, definition, values)
 
     if warnings:
         for w in warnings:
