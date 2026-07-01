@@ -46,11 +46,17 @@ The native installation is extremely straight forward, an example given for Ubun
 sudo apt install redis python3 python3-venv
 git clone https://github.com/draugnet/draugnet
 cd draugnet
+git submodule update --init --recursive
 python3 -m venv ./venv
 source .venv/bin/activate
 pip install -r requirements.txt
 mv config/settings.default.py config/settings.py
 ```
+
+Draugnet bundles three MISP data repositories as git submodules — `misp-objects`
+(object templates), `misp-taxonomies` (tag pickers) and `misp-galaxy` (galaxy/cluster
+pickers). The `git submodule update --init --recursive` step above populates them; it is
+required before the template-driven submission features and their pickers will work.
 
 ### Configuring Draugnet
 

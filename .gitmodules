@@ -1,3 +1,9 @@
 [submodule "misp-objects"]
 	path = misp-objects
 	url = https://github.com/MISP/misp-objects.git
+[submodule "misp-taxonomies"]
+	path = misp-taxonomies
+	url = https://github.com/MISP/misp-taxonomies.git
+[submodule "misp-galaxy"]
+	path = misp-galaxy
+	url = https://github.com/MISP/misp-galaxy.git
