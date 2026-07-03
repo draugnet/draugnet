@@ -596,10 +596,26 @@ def _load_schema():
         return json.load(f)
 
 
+def _filesystem_source_active():
+    """True when the backend serves templates from the filesystem source.
+
+    Fixtures that drop a ``definition.json`` on disk and then submit/fetch it
+    only make sense for the filesystem source — under the ``misp`` source the
+    loader never scans ``event-templates/`` (the dir may still exist), so such
+    a uuid is simply 404, not found-on-disk. Mirrors the T9 source check."""
+    try:
+        from config.settings import template_config
+    except Exception:
+        return True  # default source is filesystem
+    return (template_config or {}).get("source") != "misp"
+
+
 @pytest.fixture
 def invalid_fs_template():
     """Drop a schema-invalid definition into the filesystem source, yield its
-    uuid, then remove it. Skips if the filesystem source dir is not present."""
+    uuid, then remove it. Skips unless the filesystem source is active."""
+    if not _filesystem_source_active():
+        pytest.skip("backend template source is not 'filesystem'")
     if not os.path.isdir(_TEMPLATE_DIR):
         pytest.skip("filesystem template dir not present (misp source?)")
     bad_uuid = str(uuid.uuid4())
@@ -1093,7 +1109,10 @@ _FILE_TEMPLATE_NAME = "pytest file & report"
 @pytest.fixture
 def file_template():
     """Drop a schema-valid file_field/event_report template into the filesystem
-    source, yield its uuid, then remove it. Skips if the source dir is absent."""
+    source, yield its uuid, then remove it. Skips unless the filesystem source
+    is active."""
+    if not _filesystem_source_active():
+        pytest.skip("backend template source is not 'filesystem'")
     if not os.path.isdir(_TEMPLATE_DIR):
         pytest.skip("filesystem template dir not present (misp source?)")
     t_uuid = str(uuid.uuid4())
