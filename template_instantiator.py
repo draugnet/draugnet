@@ -21,9 +21,10 @@ The event is fully built in memory and validated **before** any MISP push, so
 an invalid submission raises ``HTTPException(400)`` and no token is ever minted
 (PRD B18 — transactional intent at the single-``add_event`` level).
 
-Element-type scope grew commit-by-commit across Phases 3–4. ``file_field`` is
-handled here (base64 → ``attachment`` / encrypted ``malware-sample``); the
-``event_report`` *element* lands next in Phase 4. (The slim ``description``
+Element-type scope grew commit-by-commit across Phases 3–4; all nine v1 element
+types are now handled — ``file_field`` (base64 → ``attachment`` / encrypted
+``malware-sample``) and the ``event_report`` *element* (a Markdown body →
+``add_event_report``) complete the set in Phase 4. (The slim ``description``
 metadata → event report in the hybrid block is unrelated and handled in Phase 3.)
 """
 from __future__ import annotations
@@ -310,6 +311,14 @@ def validate_user_input(definition: dict, values: dict) -> List[str]:
                 if not _is_valid_base64(data):
                     errors.append(f'file_field "{eid}" instance {idx}: data is not valid base64')
 
+        # event_report: the reporter's value is the Markdown body of the report,
+        # so it must be a plain string. Reject array/object shapes so a stale
+        # widget doesn't slip through unnoticed (parity with the PHP validator).
+        elif etype == "event_report":
+            raw = values[eid]
+            if raw is not None and not isinstance(raw, str):
+                errors.append(f'event_report "{eid}": expected a string (Markdown body)')
+
     return errors
 
 
@@ -491,6 +500,29 @@ def _build_files(event: MISPEvent, definition: dict, values: dict) -> None:
                 )
 
 
+def _build_event_reports(event: MISPEvent, definition: dict, values: dict) -> None:
+    """event_report element → one EventReport per element with non-empty content.
+
+    The report ``name`` is the element's ``label`` (falling back to its id); the
+    ``content`` is the reporter's Markdown body verbatim. Distribution 5 inherits
+    the event's (parity with ``EventTemplateInstantiator::saveEventReports``).
+    This is distinct from the hybrid ``description`` → "Additional report
+    description" report added by ``add_optional_form_data`` (Phase 3): a template
+    may carry several named event_report elements, each its own report.
+    """
+    for el in definition.get("structure") or []:
+        if not isinstance(el, dict) or el.get("type") != "event_report":
+            continue
+        eid = el.get("id")
+        if eid is None or eid not in values:
+            continue
+        content = values[eid]
+        if not isinstance(content, str) or content.strip() == "":
+            continue
+        name = el.get("label") or str(eid)
+        event.add_event_report(str(name), content, distribution=5)
+
+
 def _flatten_field_values(values: dict) -> Dict[str, Any]:
     """Project reporter values to what ``{{field:<id>}}`` can reference: scalar
     or list-of-scalar field values. object_field maps (dict / list-of-dict) have
@@ -622,6 +654,7 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     _build_object_references(definition, object_instances, warnings)
     _build_field_tags(event, definition, values, seen_tags)
     _build_files(event, definition, values)
+    _build_event_reports(event, definition, values)
 
     # Slim hybrid metadata (D5): the template owns info/distribution/threat/
     # analysis/tags/galaxies; the generic block contributes only PAP (tag),
