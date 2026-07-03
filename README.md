@@ -66,6 +66,27 @@ In the `allowed_origins` setting, add the url through which draugnet is to be re
 
 If you want draugnet to run on https (and why wouldn't you?) - simply pass the path to the cert and key files in the draugnet_config section.
 
+#### Event-template submissions
+
+Draugnet can offer reporters a set of guided, CSIRT-authored forms ("event
+templates") in addition to the raw submission formats. Templates are loaded from
+**one** config-selected source, set in `template_config` in `config/settings.py`
+(keys documented inline in `settings.default.py`):
+
+- `source = "filesystem"` (default) — drop `<name>/definition.json` files into
+  `template_config["dir"]` (`event-templates/` by default, or point it at your own
+  git submodule of curated templates). Optionally restrict which are offered with
+  the `draugnet_config["event_templates"]` whitelist (by uuid or name).
+- `source = "misp"` — pull only the templates you've **exposed** in the connected
+  MISP. In MISP's template builder, flip the *Expose to Draugnet* toggle; Draugnet
+  reads them over the `GET /event_templates/exposed` contract using its service key.
+  An exposed template is only visible to Draugnet if the service account can read it
+  under MISP's normal ACL — keep it in the service account's org, or set the
+  template's distribution to *This community*.
+
+Both sources require the bundled submodules (populated by the `git submodule
+update --init --recursive` step above), which drive the tag and galaxy pickers.
+
 For the insteallation of draugnetUI, head over to the [draugnetUI repo](https://github.com/draugnet/draugnetUI)
 
 ### Launching draugnet
