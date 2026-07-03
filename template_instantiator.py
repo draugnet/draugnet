@@ -21,14 +21,16 @@ The event is fully built in memory and validated **before** any MISP push, so
 an invalid submission raises ``HTTPException(400)`` and no token is ever minted
 (PRD B18 — transactional intent at the single-``add_event`` level).
 
-Element-type scope grows commit-by-commit across Phase 3; ``file_field`` and the
-``event_report`` *element* land in Phase 4 and are skipped here (the slim
-``description`` metadata → event report in the hybrid block is unrelated and
-handled in Phase 3).
+Element-type scope grew commit-by-commit across Phases 3–4. ``file_field`` is
+handled here (base64 → ``attachment`` / encrypted ``malware-sample``); the
+``event_report`` *element* lands next in Phase 4. (The slim ``description``
+metadata → event report in the hybrid block is unrelated and handled in Phase 3.)
 """
 from __future__ import annotations
 
 import re
+import base64
+import binascii
 import logging
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
@@ -94,6 +96,31 @@ def _object_instances(value: Any) -> List[Dict[str, Any]]:
     if isinstance(value, (list, tuple)):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _file_instances(value: Any) -> List[Dict[str, Any]]:
+    """Normalise file_field input to a list of ``{filename, data}`` maps.
+
+    Accepts a single instance map or a list of them (repeatable). Mirrors
+    ``EventTemplateInstantiator::normaliseFileInstances``; non-map entries drop.
+    """
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _is_valid_base64(data: str) -> bool:
+    """True if ``data`` is a decodable base64 string (parity with PHP's
+    ``base64_decode($data, true)`` strict check)."""
+    if not isinstance(data, str) or data == "":
+        return False
+    try:
+        base64.b64decode(data, validate=True)
+        return True
+    except (binascii.Error, ValueError):
+        return False
 
 
 def _interactive_elements(definition: dict) -> Dict[str, dict]:
@@ -255,6 +282,34 @@ def validate_user_input(definition: dict, values: dict) -> List[str]:
                         f'galaxy_field "{eid}": cluster "{value}" not found in bundled data for {gtypes}'
                     )
 
+        # file_field: each instance must be a {filename, data} map with a
+        # non-empty filename and valid base64 data; a non-repeatable field
+        # rejects multiple files. The `as` (attachment/malware-sample) choice is
+        # the author's, not reporter-supplied, so it isn't validated here. A
+        # non-empty value that isn't a file map (e.g. a stale text control) is
+        # rejected outright rather than silently dropped.
+        elif etype == "file_field":
+            instances = _file_instances(values[eid])
+            if not instances:
+                errors.append(
+                    f'file_field "{eid}": expected a {{filename, data}} object or a list of them'
+                )
+            if not el.get("repeatable") and len(instances) > 1:
+                errors.append(
+                    f'file_field "{eid}" is not repeatable but received {len(instances)} files'
+                )
+            for idx, inst in enumerate(instances, start=1):
+                filename = inst.get("filename")
+                if not isinstance(filename, str) or filename.strip() == "":
+                    errors.append(f'file_field "{eid}" instance {idx}: missing or empty filename')
+                    continue
+                data = inst.get("data")
+                if not isinstance(data, str) or data == "":
+                    errors.append(f'file_field "{eid}" instance {idx}: missing base64 data')
+                    continue
+                if not _is_valid_base64(data):
+                    errors.append(f'file_field "{eid}" instance {idx}: data is not valid base64')
+
     return errors
 
 
@@ -396,6 +451,46 @@ def _build_field_tags(event: MISPEvent, definition: dict, values: dict, seen: se
                     _add_event_tag(event, tag, seen)
 
 
+def _build_files(event: MISPEvent, definition: dict, values: dict) -> None:
+    """file_field → one file attribute per submitted ``{filename, data}`` instance.
+
+    The template author's ``as`` choice selects the attribute type (parity with
+    ``EventTemplateInstantiator::buildAttributes``): ``malware-sample`` produces
+    an encrypted, password-protected (``infected``) ZIP — PyMISP flags it
+    ``encrypt`` and MISP's ``onDemandEncrypt`` hook does the zipping server-side
+    on push — with ``to_ids`` on; anything else is a plain ``attachment`` with
+    ``to_ids`` off. Both use category ``Payload delivery`` and event-inherited
+    distribution. ``data`` is the raw file content base64-encoded on the client;
+    PyMISP base64-decodes it back into the attribute's ``data`` BytesIO. Shape /
+    base64 validity is enforced up-front in ``validate_user_input``.
+    """
+    for el in definition.get("structure") or []:
+        if not isinstance(el, dict) or el.get("type") != "file_field":
+            continue
+        eid = el.get("id")
+        if eid is None or eid not in values or _is_empty(values[eid]):
+            continue
+        as_kind = "malware-sample" if el.get("as") == "malware-sample" else "attachment"
+        for inst in _file_instances(values[eid]):
+            filename = inst.get("filename")
+            data = inst.get("data")
+            if not filename or not data:
+                continue  # guarded by validate_user_input already
+            try:
+                event.add_attribute(
+                    as_kind, str(filename),
+                    category="Payload delivery",
+                    to_ids=(as_kind == "malware-sample"),
+                    comment="", distribution=5, data=str(data),
+                )
+            except Exception as e:
+                logger.error("Failed to build %s attribute for field '%s': %s", as_kind, eid, e)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not build file attribute for field '{eid}': {e}",
+                )
+
+
 def _flatten_field_values(values: dict) -> Dict[str, Any]:
     """Project reporter values to what ``{{field:<id>}}`` can reference: scalar
     or list-of-scalar field values. object_field maps (dict / list-of-dict) have
@@ -526,6 +621,7 @@ def build_event(definition: dict, values: dict, optional: Optional[dict] = None)
     object_instances = _build_objects(event, definition, values)
     _build_object_references(definition, object_instances, warnings)
     _build_field_tags(event, definition, values, seen_tags)
+    _build_files(event, definition, values)
 
     # Slim hybrid metadata (D5): the template owns info/distribution/threat/
     # analysis/tags/galaxies; the generic block contributes only PAP (tag),
