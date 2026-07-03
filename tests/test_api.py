@@ -1070,3 +1070,189 @@ class TestMispSourcePullContract:
         r = http.get("/templates")
         assert r.status_code == 200, r.text
         assert isinstance(r.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# Event templates — Phase 4 (file_field + event_report element)  [T7]
+#
+# A file_field template isn't among the three shipped defaults, so these drop a
+# minimal, schema-valid one into the filesystem source via a fixture (mirroring
+# invalid_fs_template) covering both `as` modes plus an event_report element.
+# The malware-sample assertion keys on the composite `filename|md5` value MISP's
+# onDemandEncrypt hook produces server-side — the signature of the encrypted
+# form — and, best-effort, fetches the attachment bytes back from MISP to prove
+# they are the password-protected (`infected`) ZIP.
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+import hashlib as _hashlib
+
+_FILE_TEMPLATE_NAME = "pytest file & report"
+
+
+@pytest.fixture
+def file_template():
+    """Drop a schema-valid file_field/event_report template into the filesystem
+    source, yield its uuid, then remove it. Skips if the source dir is absent."""
+    if not os.path.isdir(_TEMPLATE_DIR):
+        pytest.skip("filesystem template dir not present (misp source?)")
+    t_uuid = str(uuid.uuid4())
+    defn = {
+        "schema_version": 1,
+        "uuid": t_uuid,
+        "name": _FILE_TEMPLATE_NAME,
+        "description": "T7 fixture: attachment + malware-sample + event report",
+        "event_defaults": {"info_template": "T7 file & report {{date}}", "distribution": 0},
+        "structure": [
+            {"type": "file_field", "id": "att", "label": "Attachment",
+             "as": "attachment", "repeatable": True},
+            {"type": "file_field", "id": "sample", "label": "Sample",
+             "as": "malware-sample", "repeatable": True},
+            {"type": "event_report", "id": "notes", "label": "Analyst notes"},
+        ],
+    }
+    # Guard the fixture itself against schema drift.
+    schema = _load_schema()
+    if schema is not None and _jsonschema is not None:
+        _jsonschema.Draft7Validator(schema).validate(defn)
+    d = os.path.join(_TEMPLATE_DIR, "_pytest_file_report")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "definition.json"), "w", encoding="utf-8") as f:
+        json.dump(defn, f)
+    try:
+        yield t_uuid
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _attrs_by_type(event, atype):
+    return [a for a in event.get("Attribute", []) if a.get("type") == atype]
+
+
+def _assert_encrypted_zip(event_uuid, raw, md5):
+    """Fetch the event's attachment bytes from MISP and assert the malware-sample
+    is the password-protected ZIP form. Best-effort: skips (not fails) if MISP
+    can't be reached directly from the test host or withholds the bytes."""
+    try:
+        import io
+        from zipfile import ZipFile
+        from config.settings import misp_config
+        from pymisp import PyMISP
+    except Exception as e:  # pragma: no cover
+        pytest.skip(f"cannot verify encrypted zip form directly: {e}")
+    try:
+        p = PyMISP(misp_config["url"], misp_config["key"], misp_config.get("verifycert", False))
+        res = p.search(controller="events", eventid=event_uuid,
+                       with_attachments=True, published=[True, False])
+    except Exception as e:
+        pytest.skip(f"MISP not reachable for attachment verification: {e}")
+    attrs = res[0]["Event"]["Attribute"] if res else []
+    sample = next((a for a in attrs if a.get("type") == "malware-sample"), None)
+    assert sample is not None
+    data = sample.get("data")
+    if not data:
+        pytest.skip("MISP did not return attachment bytes")
+    blob = _base64.b64decode(data)
+    assert blob[:2] == b"PK", "malware-sample data is not a ZIP (server-side encryption did not run)"
+    with ZipFile(io.BytesIO(blob)) as zf:
+        names = zf.namelist()
+        assert f"{md5}.filename.txt" in names, names
+        payload_name = next(n for n in names if not n.endswith(".filename.txt"))
+        assert zf.read(payload_name, pwd=b"infected") == raw
+
+
+# ---- T7: file_field attachment + malware-sample -----------------------------
+
+class TestTemplateFileField:
+    def test_attachment_from_base64(self, http, file_template):
+        raw = b"proof-of-payment contents \x00\x01\x02"
+        b64 = _base64.b64encode(raw).decode()
+        r = _submit_template(http, file_template,
+                             {"att": [{"filename": "receipt.pdf", "data": b64}]})
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        atts = _attrs_by_type(event, "attachment")
+        assert len(atts) == 1
+        a = atts[0]
+        assert a["value"] == "receipt.pdf"
+        assert a["category"] == "Payload delivery"
+        assert a["to_ids"] in (False, 0, "0")
+
+    def test_malware_sample_is_encrypted(self, http, file_template):
+        raw = b"MZ\x90\x00 this is a fake malware binary payload"
+        md5 = _hashlib.md5(raw).hexdigest()
+        b64 = _base64.b64encode(raw).decode()
+        r = _submit_template(http, file_template,
+                             {"sample": [{"filename": "evil.bin", "data": b64}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        event = _retrieve_event(http, body["token"])
+        samples = _attrs_by_type(event, "malware-sample")
+        assert len(samples) == 1
+        s = samples[0]
+        # Composite `filename|md5` value is the encrypted-form signature: it only
+        # appears after MISP's onDemandEncrypt zips/encrypts the sample server-side.
+        assert s["value"] == f"evil.bin|{md5}", s["value"]
+        assert s["category"] == "Payload delivery"
+        assert s["to_ids"] in (True, 1, "1")
+        _assert_encrypted_zip(body["event_uuid"], raw, md5)
+
+    def test_repeatable_files(self, http, file_template):
+        b64 = _base64.b64encode(b"x").decode()
+        r = _submit_template(http, file_template, {"att": [
+            {"filename": "a.txt", "data": b64},
+            {"filename": "b.txt", "data": b64},
+        ]})
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        names = {a["value"] for a in _attrs_by_type(event, "attachment")}
+        assert names == {"a.txt", "b.txt"}
+
+    def test_invalid_base64_rejected(self, http, file_template):
+        r = _submit_template(http, file_template,
+                             {"att": [{"filename": "x", "data": "@@@not base64@@@"}]})
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+    def test_missing_filename_rejected(self, http, file_template):
+        b64 = _base64.b64encode(b"x").decode()
+        r = _submit_template(http, file_template, {"att": [{"data": b64}]})
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+
+# ---- Phase-4 event_report element -------------------------------------------
+
+class TestTemplateEventReport:
+    def test_event_report_element_creates_report(self, http, file_template):
+        content = "## Behaviour\n\nBeacons to bad.example every 60s."
+        r = _submit_template(http, file_template, {"notes": content})
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        reports = {rep["name"]: rep for rep in event.get("EventReport", [])}
+        assert "Analyst notes" in reports
+        assert reports["Analyst notes"]["content"] == content
+
+    def test_non_string_event_report_rejected(self, http, file_template):
+        r = _submit_template(http, file_template, {"notes": ["not", "a", "string"]})
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+    def test_event_report_on_shipped_template(self, http):
+        """The event_report element also works on a shipped template (not just
+        the fixture) — Suspicious domain triage carries `why_suspicious`."""
+        u = _find_template_uuid(http, "Suspicious domain triage")
+        if not u:
+            pytest.skip("'Suspicious domain triage' not available in the active source")
+        vals = {
+            "domain": "suspicious.example",
+            "date_observed": "2026-07-03T10:00:00+00:00",
+            "tlp": "tlp:amber",
+            "why_suspicious": "Freshly registered; NXDOMAIN churn.",
+        }
+        r = _submit_template(http, u, vals)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        report_names = {rep["name"] for rep in event.get("EventReport", [])}
+        assert "Why suspicious" in report_names
