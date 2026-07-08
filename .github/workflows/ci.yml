@@ -10,6 +10,20 @@ jobs:
   test:
     runs-on: ubuntu-22.04
 
+    services:
+      # Redis for Draugnet token storage. A health-checked service container is
+      # reachable at 127.0.0.1:6379 only once it answers PING, so tests never
+      # start against a redis that isn't actually up.
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       # ── Checkouts ─────────────────────────────────────────────────────────
       - name: Checkout Draugnet
@@ -35,11 +49,6 @@ jobs:
           mysql user: 'misp'
           mysql password: 'blah'
 
-      - uses: zhulik/redis-action@1.1.0
-        with:
-          redis version: '5'
-          number of databases: 100
-
       # ── PHP (adds PPA — must come before apt-get installs) ───────────────
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -56,7 +65,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get -y update
-          sudo apt-get -y install curl apache2 libapache2-mod-php8.3 python3-virtualenv
+          sudo apt-get -y install curl apache2 libapache2-mod-php8.3 python3-virtualenv redis-tools
 
       - name: Install MISP
         run: |
@@ -180,7 +189,7 @@ jobs:
               'verifycert': False,
           }
           redis_config = {
-              'host': 'localhost',
+              'host': '127.0.0.1',
               'port': 6379,
               'db': 5,
           }
@@ -194,6 +203,10 @@ jobs:
           }
           modules_config = {}
           EOF
+
+      - name: Verify Redis is reachable
+        run: |
+          redis-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG
 
       - name: Start Draugnet
         working-directory: draugnet

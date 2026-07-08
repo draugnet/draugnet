@@ -29,10 +29,21 @@ def is_valid_template_name(name: str) -> bool:
 
 def get_redis():
     try:
-        redis = Redis(host=redis_config['host'], port=redis_config['port'], db=redis_config['db'])
+        redis = Redis(
+            host=redis_config['host'],
+            port=redis_config['port'],
+            db=redis_config['db'],
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        # Redis clients connect lazily, so a bare constructor stays truthy even
+        # when the server is unreachable — masking the failure until the first
+        # get/set raises deep inside a handler (a confusing 500). Ping here so
+        # callers' `if not redis` guard actually means "redis is usable".
+        redis.ping()
         return redis
-    except:
-        print("Could not connect to redis.")
+    except Exception:
+        logger.error("Could not connect to Redis.")
         return None
 
 def get_misp():
