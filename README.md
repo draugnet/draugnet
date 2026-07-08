@@ -46,11 +46,17 @@ The native installation is extremely straight forward, an example given for Ubun
 sudo apt install redis python3 python3-venv
 git clone https://github.com/draugnet/draugnet
 cd draugnet
+git submodule update --init --recursive
 python3 -m venv ./venv
 source .venv/bin/activate
 pip install -r requirements.txt
 mv config/settings.default.py config/settings.py
 ```
+
+Draugnet bundles three MISP data repositories as git submodules — `misp-objects`
+(object templates), `misp-taxonomies` (tag pickers) and `misp-galaxy` (galaxy/cluster
+pickers). The `git submodule update --init --recursive` step above populates them; it is
+required before the template-driven submission features and their pickers will work.
 
 ### Configuring Draugnet
 
@@ -59,6 +65,27 @@ Edit the settings file that is now found at `{draugnet_path}/config/settings.py`
 In the `allowed_origins` setting, add the url through which draugnet is to be reached and if you wish to run draugnet's frontent (draugnetUI), make sure tou add the URL of your draugnetUI server too to the list of whitelisted origins. 
 
 If you want draugnet to run on https (and why wouldn't you?) - simply pass the path to the cert and key files in the draugnet_config section.
+
+#### Event-template submissions
+
+Draugnet can offer reporters a set of guided, CSIRT-authored forms ("event
+templates") in addition to the raw submission formats. Templates are loaded from
+**one** config-selected source, set in `template_config` in `config/settings.py`
+(keys documented inline in `settings.default.py`):
+
+- `source = "filesystem"` (default) — drop `<name>/definition.json` files into
+  `template_config["dir"]` (`event-templates/` by default, or point it at your own
+  git submodule of curated templates). Optionally restrict which are offered with
+  the `draugnet_config["event_templates"]` whitelist (by uuid or name).
+- `source = "misp"` — pull only the templates you've **exposed** in the connected
+  MISP. In MISP's template builder, flip the *Expose to Draugnet* toggle; Draugnet
+  reads them over the `GET /event_templates/exposed` contract using its service key.
+  An exposed template is only visible to Draugnet if the service account can read it
+  under MISP's normal ACL — keep it in the service account's org, or set the
+  template's distribution to *This community*.
+
+Both sources require the bundled submodules (populated by the `git submodule
+update --init --recursive` step above), which drive the tag and galaxy pickers.
 
 For the insteallation of draugnetUI, head over to the [draugnetUI repo](https://github.com/draugnet/draugnetUI)
 

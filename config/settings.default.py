@@ -19,6 +19,20 @@ modules_config = {
             # 'verifycert': True
         }
     },
+    "alerting": {
+        "email": {
+            # "enabled": True,
+            # "smtp_host": "localhost",       # SMTP relay hostname
+            # "smtp_port": 25,                # SMTP relay port
+            # "smtp_tls": False,              # Use implicit TLS (SMTPS, typically port 465)
+            # "smtp_starttls": False,         # Use STARTTLS (typically port 587)
+            # "smtp_username": "",            # Leave empty if relay does not require auth
+            # "smtp_password": "",
+            # "sender": "draugnet@example.com",
+            # "recipients": ["soc@example.com"],
+            # "subject_prefix": "[Draugnet]"
+        }
+    },
     "enhancements": {
         "ollama": {
             # "enabled": True,
@@ -56,7 +70,24 @@ draugnet_config = {
    "misp_object_templates": [
 #     add a list of MISP object templates that you want to use - leave empty if you want to use all of them
    ],
+   "event_templates": [
+#     optional whitelist of event templates to expose (by uuid or name) - leave empty to allow all
+#     applies to the "filesystem" template source (see template_config below)
+   ],
    "ssl_cert_path": "",
    "ssl_key_path": "",
    "name": "Draugnet" # Name of the instance, used in various places to identify the source when multiple instances are used
+}
+
+# event-template data-entry source configuration
+#   source:    "filesystem" (default) load <template>/definition.json files from `dir`
+#              "misp"                  pull the exposed event-template definitions from the
+#                                      configured MISP (reuses misp_config for url + service key)
+#   dir:       filesystem source only  directory holding <template>/definition.json files;
+#                                      relative paths are resolved against the Draugnet app root
+#   cache_ttl: misp source only        seconds to cache the exposed-listing pull (0 disables caching)
+template_config = {
+    "source": "filesystem",
+    "dir": "event-templates",
+    "cache_ttl": 300,
 }

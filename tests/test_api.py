@@ -569,3 +569,709 @@ class TestOptionalMetadata:
         payload["optional"] = self.OPTIONAL
         r = http.post("/share/misp", json=payload)
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Event templates — Phase 2 (loader, listing, fetch, pickers)  [T1, T2, T3]
+#
+# These exercise the *filesystem* source (the shipped default). The MISP-pull
+# source shares the same loader/validation path and is covered by T9 in Phase 3,
+# once the Phase-1 exposed-listing endpoint is deployed to the dev MISP.
+# ---------------------------------------------------------------------------
+
+try:
+    import jsonschema as _jsonschema
+except ImportError:  # pragma: no cover
+    _jsonschema = None
+
+_REPO_ROOT   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TEMPLATE_DIR = os.path.join(_REPO_ROOT, "event-templates")
+_SCHEMA_FILE  = os.path.join(_REPO_ROOT, "schemas", "event-template-v1.schema.json")
+
+
+def _load_schema():
+    if not os.path.isfile(_SCHEMA_FILE):
+        return None
+    with open(_SCHEMA_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _filesystem_source_active():
+    """True when the backend serves templates from the filesystem source.
+
+    Fixtures that drop a ``definition.json`` on disk and then submit/fetch it
+    only make sense for the filesystem source — under the ``misp`` source the
+    loader never scans ``event-templates/`` (the dir may still exist), so such
+    a uuid is simply 404, not found-on-disk. Mirrors the T9 source check."""
+    try:
+        from config.settings import template_config
+    except Exception:
+        return True  # default source is filesystem
+    return (template_config or {}).get("source") != "misp"
+
+
+@pytest.fixture
+def invalid_fs_template():
+    """Drop a schema-invalid definition into the filesystem source, yield its
+    uuid, then remove it. Skips unless the filesystem source is active."""
+    if not _filesystem_source_active():
+        pytest.skip("backend template source is not 'filesystem'")
+    if not os.path.isdir(_TEMPLATE_DIR):
+        pytest.skip("filesystem template dir not present (misp source?)")
+    bad_uuid = str(uuid.uuid4())
+    d = os.path.join(_TEMPLATE_DIR, "_pytest_invalid")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "definition.json"), "w", encoding="utf-8") as f:
+        # Missing the required event_defaults + structure → fails validation.
+        json.dump({"schema_version": 1, "uuid": bad_uuid, "name": "pytest invalid"}, f)
+    try:
+        yield bad_uuid
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ---- T1: GET /templates lists expected templates; invalid excluded ----------
+
+class TestEventTemplatesList:
+    def test_returns_200_list(self, http):
+        r = http.get("/templates")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_summary_shape(self, http):
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        for t in templates:
+            assert set(t.keys()) >= {"uuid", "name", "description", "tags"}
+            assert isinstance(t["tags"], list)
+            assert t["uuid"] and t["name"]
+
+    def test_listed_templates_fetch_and_validate(self, http):
+        schema = _load_schema()
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        for t in templates[:5]:
+            r = http.get(f"/templates/{t['uuid']}")
+            assert r.status_code == 200, r.text
+            defn = r.json()
+            assert defn["uuid"] == t["uuid"]
+            if schema is not None and _jsonschema is not None:
+                _jsonschema.Draft7Validator(schema).validate(defn)
+
+    def test_invalid_definition_excluded_from_listing(self, http, invalid_fs_template):
+        uuids = {t["uuid"] for t in http.get("/templates").json()}
+        assert invalid_fs_template not in uuids
+        # Found on disk but invalid → direct fetch is 422 (not 404, not 200).
+        r = http.get(f"/templates/{invalid_fs_template}")
+        assert r.status_code == 422
+
+
+# ---- T2: GET /templates/{uuid} returns schema-valid definition; traversal ---
+
+class TestEventTemplateFetch:
+    def test_fetch_valid_definition(self, http):
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        r = http.get(f"/templates/{templates[0]['uuid']}")
+        assert r.status_code == 200
+        defn = r.json()
+        assert "structure" in defn and "event_defaults" in defn
+
+    def test_fetched_definition_is_schema_valid(self, http):
+        schema = _load_schema()
+        if schema is None or _jsonschema is None:
+            pytest.skip("bundled schema or jsonschema not available")
+        templates = http.get("/templates").json()
+        if not templates:
+            pytest.skip("no event templates configured")
+        defn = http.get(f"/templates/{templates[0]['uuid']}").json()
+        _jsonschema.Draft7Validator(schema).validate(defn)  # raises on invalid
+
+    def test_unknown_uuid_returns_404(self, http):
+        r = http.get(f"/templates/{uuid.uuid4()}")
+        assert r.status_code == 404
+
+    @pytest.mark.parametrize("bad", [
+        "not-a-uuid",
+        "..%2F..%2F..%2Fetc%2Fpasswd",
+        "%2e%2e%2f%2e%2e%2fsettings.py",
+        "12345",
+    ])
+    def test_path_traversal_and_bad_uuid_blocked(self, http, bad):
+        r = http.get(f"/templates/{bad}")
+        assert r.status_code in (400, 404), (bad, r.status_code, r.text)
+
+
+# ---- T3: taxonomy + galaxy pickers return bundled data; bounded; no MISP ----
+
+class TestTaxonomyPicker:
+    def test_tlp_entries(self, http):
+        r = http.get("/taxonomies", params={"ns": "tlp"})
+        assert r.status_code == 200
+        tags = {e["tag"] for e in r.json()["entries"]}
+        assert "tlp:amber" in tags
+        assert "tlp:red" in tags
+
+    def test_kill_chain_entries(self, http):
+        r = http.get("/taxonomies", params={"ns": "kill-chain"})
+        assert r.status_code == 200
+        assert len(r.json()["entries"]) > 0
+
+    def test_unknown_namespace_is_empty_not_error(self, http):
+        r = http.get("/taxonomies", params={"ns": "this-namespace-does-not-exist-xyz"})
+        assert r.status_code == 200
+        assert r.json()["entries"] == []
+
+    def test_invalid_namespace_rejected(self, http):
+        r = http.get("/taxonomies", params={"ns": "../../etc"})
+        assert r.status_code == 400
+
+    def test_missing_ns_returns_422(self, http):
+        r = http.get("/taxonomies")
+        assert r.status_code == 422
+
+
+class TestGalaxyPicker:
+    def test_threat_actor_search(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "q": "apt"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] > 0
+        values = {x["value"] for x in body["results"]}
+        assert "APT1" in values
+        for x in body["results"]:
+            assert x["tag"].startswith('misp-galaxy:threat-actor="')
+
+    def test_results_are_bounded(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "q": "a", "limit": 5})
+        assert r.status_code == 200
+        assert r.json()["count"] <= 5
+
+    def test_synonym_search(self, http):
+        # APT1 carries the synonym "Comment Crew".
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "q": "comment crew"})
+        assert r.status_code == 200
+        assert any(x["value"] == "APT1" for x in r.json()["results"])
+
+    def test_unknown_type_is_empty_not_error(self, http):
+        # "never error if MISP galaxy data differs" — an unknown/absent type must
+        # return an empty result, not a 5xx.
+        r = http.get("/galaxy_clusters", params={"type": "this-galaxy-does-not-exist-xyz", "q": "x"})
+        assert r.status_code == 200
+        assert r.json()["results"] == []
+
+    def test_invalid_type_rejected(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "../../etc/passwd"})
+        assert r.status_code == 400
+
+    def test_over_limit_rejected(self, http):
+        r = http.get("/galaxy_clusters", params={"type": "threat-actor", "limit": 9999})
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Event templates — Phase 3 (instantiation engine)  [T4, T5, T6, T8, T9]
+#
+# These submit via POST /share/template and then retrieve the resulting MISP
+# event to assert its structure. They use the shipped "Spearphishing email
+# triage" template (filesystem source), which exercises every non-file element
+# type: attribute_field, object_field, object_reference, tag_field,
+# galaxy_field, section/text_block, plus event_defaults. file_field and the
+# event_report *element* land in Phase 4 (T7).
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+
+_SPEARPHISH_NAME = "Spearphishing email triage"
+
+
+def _find_template_uuid(http, name):
+    r = http.get("/templates")
+    if r.status_code != 200:
+        return None
+    for t in r.json():
+        if t.get("name") == name:
+            return t.get("uuid")
+    return None
+
+
+def _submit_template(http, template_uuid, values, optional=None):
+    body = {"template_uuid": template_uuid, "values": values}
+    if optional is not None:
+        body["optional"] = optional
+    return http.post("/share/template", json=body)
+
+
+def _retrieve_event(http, token):
+    """Retrieve a token's MISP event as the inner Event dict."""
+    r = http.get(f"/retrieve?token={token}&format=json")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert isinstance(data, list) and data, f"unexpected /retrieve shape: {data!r}"
+    return data[0]["Event"]
+
+
+def _attrs_by_value(event):
+    out = {}
+    for a in event.get("Attribute", []):
+        out.setdefault(a["value"], a)
+    return out
+
+
+def _spearphish_full_values():
+    """A rich submission touching every element type in the spearphishing template."""
+    return {
+        "sender": "attacker@evil.example",
+        "envelope_sender": "bounce@evil.example",
+        "subject": "Your invoice is overdue",
+        "received_from_ip": "203.0.113.9",
+        "payload_url": ["http://bad.example/a", "http://bad.example/b"],
+        "obj_email": {
+            "from": "attacker@evil.example",
+            "subject": "Your invoice is overdue",
+            "message-id": "<deadbeef@evil.example>",
+            "reply-to": "totally-legit@evil.example",
+        },
+        "obj_attachment": [
+            {"filename": "invoice.pdf.exe", "sha256": "a" * 64},
+            {"filename": "payload.zip", "sha256": "b" * 64},
+        ],
+        "tlp": "tlp:amber",
+        "kill_chain": ["kill-chain:Delivery", "kill-chain:Exploitation"],
+        "actor": "APT28",
+    }
+
+
+@pytest.fixture(scope="module")
+def spearphish_uuid(http):
+    u = _find_template_uuid(http, _SPEARPHISH_NAME)
+    if not u:
+        pytest.skip(f"template '{_SPEARPHISH_NAME}' not available in the active source")
+    return u
+
+
+@pytest.fixture(scope="module")
+def happy_event(http, spearphish_uuid):
+    """Submit the full spearphishing payload once and return the resulting event."""
+    r = _submit_template(http, spearphish_uuid, _spearphish_full_values())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok" and body.get("token")
+    return _retrieve_event(http, body["token"])
+
+
+# ---- T4: happy path per element type ----------------------------------------
+
+class TestTemplateHappyPath:
+    def test_event_defaults_and_info_substitution(self, happy_event):
+        assert happy_event["info"].startswith("Spearphishing")
+        assert "attacker@evil.example" in happy_event["info"]   # {{field:sender}}
+        assert int(happy_event["distribution"]) == 1
+        assert int(happy_event["threat_level_id"]) == 2
+        assert int(happy_event["analysis"]) == 0
+
+    def test_attribute_fields(self, happy_event):
+        by_val = _attrs_by_value(happy_event)
+        sender = by_val.get("attacker@evil.example")
+        assert sender is not None
+        assert sender["type"] == "email-src"
+        assert sender["category"] == "Payload delivery"
+        assert sender["to_ids"] in (True, 1, "1")
+        assert sender.get("comment") == "From: header"
+        subj = by_val.get("Your invoice is overdue")
+        assert subj is not None and subj["type"] == "email-subject"
+        assert by_val.get("203.0.113.9", {}).get("type") == "ip-src"
+        urls = {a["value"] for a in happy_event.get("Attribute", []) if a["type"] == "url"}
+        assert urls >= {"http://bad.example/a", "http://bad.example/b"}
+
+    def test_object_fields(self, happy_event):
+        objs = happy_event.get("Object", [])
+        emails = [o for o in objs if o["name"] == "email"]
+        files = [o for o in objs if o["name"] == "file"]
+        assert len(emails) == 1
+        assert len(files) == 2
+        email_rels = {a["object_relation"]: a["value"] for a in emails[0].get("Attribute", [])}
+        assert email_rels.get("from") == "attacker@evil.example"
+        assert email_rels.get("subject") == "Your invoice is overdue"
+        assert "message-id" in email_rels
+        filenames = {
+            a["value"] for o in files for a in o.get("Attribute", [])
+            if a["object_relation"] == "filename"
+        }
+        assert filenames == {"invoice.pdf.exe", "payload.zip"}
+
+    def test_object_references(self, happy_event):
+        objs = happy_event.get("Object", [])
+        email = next(o for o in objs if o["name"] == "email")
+        file_uuids = {o["uuid"] for o in objs if o["name"] == "file"}
+        refs = email.get("ObjectReference", [])
+        # Per-target-instance rule: one reference per attachment object.
+        assert len(refs) == 2
+        for ref in refs:
+            assert ref["relationship_type"] == "contained-within"
+            assert ref["referenced_uuid"] in file_uuids
+
+    def test_event_tags(self, happy_event):
+        names = {t["name"] for t in happy_event.get("Tag", [])}
+        assert "source:draugnet" in names                      # pipeline preserved
+        assert "tlp:amber" in names                            # default + user tag_field
+        assert "kill-chain:Delivery" in names                  # multi tag_field
+        assert "kill-chain:Exploitation" in names
+        assert 'misp-galaxy:threat-actor="APT28"' in names     # galaxy_field
+
+
+# ---- T5: mandatory enforcement (nothing pushed / no token) ------------------
+
+class TestTemplateMandatory:
+    def test_missing_mandatory_attribute_field(self, http, spearphish_uuid):
+        vals = _spearphish_full_values()
+        del vals["sender"]  # mandatory
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+    def test_missing_mandatory_object_relation(self, http, spearphish_uuid):
+        vals = {
+            "sender": "a@evil.example", "subject": "h", "tlp": "tlp:amber",
+            "obj_email": {"subject": "h"},  # missing mandatory 'from'
+        }
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 400, r.text
+        assert "from" in json.dumps(r.json().get("detail"))
+
+    def test_empty_submission_lists_missing_mandatories(self, http, spearphish_uuid):
+        r = _submit_template(http, spearphish_uuid, {})
+        assert r.status_code == 400
+        assert "token" not in r.json()
+
+
+# ---- T6: repeatable attributes/objects → multiple instances -----------------
+
+class TestTemplateRepeatable:
+    def test_repeatable_attributes_and_objects(self, http, spearphish_uuid):
+        vals = {
+            "sender": "a@evil.example", "subject": "h", "tlp": "tlp:amber",
+            "payload_url": ["http://a/", "http://b/", "http://c/"],
+            "obj_attachment": [
+                {"filename": "1.bin", "sha256": "1" * 64},
+                {"filename": "2.bin", "sha256": "2" * 64},
+            ],
+        }
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        urls = [a for a in event.get("Attribute", []) if a["type"] == "url"]
+        assert len(urls) == 3
+        files = [o for o in event.get("Object", []) if o["name"] == "file"]
+        assert len(files) == 2
+
+
+# ---- T8: hybrid metadata + locked tags + substitution -----------------------
+
+class TestTemplateHybridMetadata:
+    def test_hybrid_metadata_and_locked_default_tag(self, http, spearphish_uuid):
+        optional = {
+            "pap": "PAP:RED",
+            "submitter": "analyst-jane",
+            "description": "SOC tier-1 escalation.",
+        }
+        vals = {"sender": "attacker@evil.example", "subject": "Overdue invoice", "tlp": "tlp:amber"}
+        r = _submit_template(http, spearphish_uuid, vals, optional)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        names = {t["name"] for t in event.get("Tag", [])}
+        assert "PAP:RED" in names
+        assert "submitter:analyst-jane" in names
+        assert "tlp:amber" in names  # locked default tag present alongside metadata
+        report_names = {rep["name"] for rep in event.get("EventReport", [])}
+        assert "Additional report description" in report_names
+
+    def test_info_field_substitution(self, http, spearphish_uuid):
+        import datetime
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        vals = {"sender": "pat@victim.example", "subject": "x", "tlp": "tlp:amber"}
+        r = _submit_template(http, spearphish_uuid, vals)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        assert today in event["info"]                 # {{date}}
+        assert "pat@victim.example" in event["info"]   # {{field:sender}}
+
+
+class TestInfoTemplateSubstitution:
+    """Unit coverage of render_info_template, including {{user}} — no shipped
+    template uses {{user}}, so it can't be exercised through the API path."""
+
+    def test_all_substitution_forms(self):
+        import datetime
+        import template_instantiator as ti
+        out = ti.render_info_template(
+            "d={{date}} u={{user}} f={{field:sender}}",
+            {"sender": "who@x.y"},
+            user="reporter@corp.example",
+        )
+        assert f"d={datetime.date.today().strftime('%Y-%m-%d')}" in out
+        assert "u=reporter@corp.example" in out
+        assert "f=who@x.y" in out
+
+    def test_user_empty_when_no_submitter(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("[{{user}}]", {}, user="") == "[]"
+
+    def test_field_repeatable_uses_first_value(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("{{field:x}}", {"x": ["one", "two"]}) == "one"
+
+    def test_object_field_not_projected_into_info(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("[{{field:obj}}]", {"obj": {"a": "b"}}) == "[]"
+
+    def test_missing_field_is_blank(self):
+        import template_instantiator as ti
+        assert ti.render_info_template("[{{field:nope}}]", {}) == "[]"
+
+
+# ---- T9: MISP-source (exposed-listing) pull contract  [M3] ------------------
+#
+# The full source switch (template_source = "misp") is an operator step
+# (config + restart). This asserts the coupling point the misp source consumes —
+# GET /event_templates/exposed on the connected MISP — and that the loader can
+# extract + schema-validate each exposed definition. Skips cleanly when the
+# Phase-1 endpoint isn't deployed (404) or no template is flagged exposed yet.
+
+class TestMispSourcePullContract:
+    def test_exposed_listing_definitions_are_valid(self):
+        try:
+            from config.settings import misp_config
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"backend config not importable: {e}")
+        url = misp_config["url"].rstrip("/") + "/event_templates/exposed"
+        headers = {"Authorization": misp_config["key"], "Accept": "application/json"}
+        try:
+            resp = httpx.get(
+                url, headers=headers,
+                verify=misp_config.get("verifycert", True), timeout=15,
+            )
+        except Exception as e:
+            pytest.skip(f"MISP not reachable for exposed-listing contract: {e}")
+        if resp.status_code == 404:
+            pytest.skip("Phase-1 /event_templates/exposed not deployed on this MISP")
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        assert isinstance(rows, list)
+        if not rows:
+            pytest.skip("no event templates flagged exposed on this MISP")
+
+        import template_loader
+        for row in rows:
+            defn = template_loader._extract_definition(row)
+            assert isinstance(defn, dict), f"exposed row missing usable definition: {row!r}"
+            ok, reason = template_loader.validate_definition(defn)
+            assert ok, f"exposed definition failed schema validation: {reason}"
+
+    def test_backend_lists_exposed_when_source_is_misp(self, http):
+        """If the backend is actually configured for the misp source, its
+        /templates listing must serve the exposed definitions (end-to-end T9)."""
+        try:
+            from config.settings import template_config
+        except Exception as e:  # pragma: no cover
+            pytest.skip(f"backend config not importable: {e}")
+        if (template_config or {}).get("source") != "misp":
+            pytest.skip("backend template source is not 'misp' (filesystem default)")
+        r = http.get("/templates")
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# Event templates — Phase 4 (file_field + event_report element)  [T7]
+#
+# A file_field template isn't among the three shipped defaults, so these drop a
+# minimal, schema-valid one into the filesystem source via a fixture (mirroring
+# invalid_fs_template) covering both `as` modes plus an event_report element.
+# The malware-sample assertion keys on the composite `filename|md5` value MISP's
+# onDemandEncrypt hook produces server-side — the signature of the encrypted
+# form — and, best-effort, fetches the attachment bytes back from MISP to prove
+# they are the password-protected (`infected`) ZIP.
+# ---------------------------------------------------------------------------
+
+import base64 as _base64
+import hashlib as _hashlib
+
+_FILE_TEMPLATE_NAME = "pytest file & report"
+
+
+@pytest.fixture
+def file_template():
+    """Drop a schema-valid file_field/event_report template into the filesystem
+    source, yield its uuid, then remove it. Skips unless the filesystem source
+    is active."""
+    if not _filesystem_source_active():
+        pytest.skip("backend template source is not 'filesystem'")
+    if not os.path.isdir(_TEMPLATE_DIR):
+        pytest.skip("filesystem template dir not present (misp source?)")
+    t_uuid = str(uuid.uuid4())
+    defn = {
+        "schema_version": 1,
+        "uuid": t_uuid,
+        "name": _FILE_TEMPLATE_NAME,
+        "description": "T7 fixture: attachment + malware-sample + event report",
+        "event_defaults": {"info_template": "T7 file & report {{date}}", "distribution": 0},
+        "structure": [
+            {"type": "file_field", "id": "att", "label": "Attachment",
+             "as": "attachment", "repeatable": True},
+            {"type": "file_field", "id": "sample", "label": "Sample",
+             "as": "malware-sample", "repeatable": True},
+            {"type": "event_report", "id": "notes", "label": "Analyst notes"},
+        ],
+    }
+    # Guard the fixture itself against schema drift.
+    schema = _load_schema()
+    if schema is not None and _jsonschema is not None:
+        _jsonschema.Draft7Validator(schema).validate(defn)
+    d = os.path.join(_TEMPLATE_DIR, "_pytest_file_report")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "definition.json"), "w", encoding="utf-8") as f:
+        json.dump(defn, f)
+    try:
+        yield t_uuid
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _attrs_by_type(event, atype):
+    return [a for a in event.get("Attribute", []) if a.get("type") == atype]
+
+
+def _assert_encrypted_zip(event_uuid, raw, md5):
+    """Fetch the event's attachment bytes from MISP and assert the malware-sample
+    is the password-protected ZIP form. Best-effort: skips (not fails) if MISP
+    can't be reached directly from the test host or withholds the bytes."""
+    try:
+        import io
+        from zipfile import ZipFile
+        from config.settings import misp_config
+        from pymisp import PyMISP
+    except Exception as e:  # pragma: no cover
+        pytest.skip(f"cannot verify encrypted zip form directly: {e}")
+    try:
+        p = PyMISP(misp_config["url"], misp_config["key"], misp_config.get("verifycert", False))
+        res = p.search(controller="events", eventid=event_uuid,
+                       with_attachments=True, published=[True, False])
+    except Exception as e:
+        pytest.skip(f"MISP not reachable for attachment verification: {e}")
+    attrs = res[0]["Event"]["Attribute"] if res else []
+    sample = next((a for a in attrs if a.get("type") == "malware-sample"), None)
+    assert sample is not None
+    data = sample.get("data")
+    if not data:
+        pytest.skip("MISP did not return attachment bytes")
+    blob = _base64.b64decode(data)
+    assert blob[:2] == b"PK", "malware-sample data is not a ZIP (server-side encryption did not run)"
+    with ZipFile(io.BytesIO(blob)) as zf:
+        names = zf.namelist()
+        assert f"{md5}.filename.txt" in names, names
+        payload_name = next(n for n in names if not n.endswith(".filename.txt"))
+        assert zf.read(payload_name, pwd=b"infected") == raw
+
+
+# ---- T7: file_field attachment + malware-sample -----------------------------
+
+class TestTemplateFileField:
+    def test_attachment_from_base64(self, http, file_template):
+        raw = b"proof-of-payment contents \x00\x01\x02"
+        b64 = _base64.b64encode(raw).decode()
+        r = _submit_template(http, file_template,
+                             {"att": [{"filename": "receipt.pdf", "data": b64}]})
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        atts = _attrs_by_type(event, "attachment")
+        assert len(atts) == 1
+        a = atts[0]
+        assert a["value"] == "receipt.pdf"
+        assert a["category"] == "Payload delivery"
+        assert a["to_ids"] in (False, 0, "0")
+
+    def test_malware_sample_is_encrypted(self, http, file_template):
+        raw = b"MZ\x90\x00 this is a fake malware binary payload"
+        md5 = _hashlib.md5(raw).hexdigest()
+        b64 = _base64.b64encode(raw).decode()
+        r = _submit_template(http, file_template,
+                             {"sample": [{"filename": "evil.bin", "data": b64}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        event = _retrieve_event(http, body["token"])
+        samples = _attrs_by_type(event, "malware-sample")
+        assert len(samples) == 1
+        s = samples[0]
+        # Composite `filename|md5` value is the encrypted-form signature: it only
+        # appears after MISP's onDemandEncrypt zips/encrypts the sample server-side.
+        assert s["value"] == f"evil.bin|{md5}", s["value"]
+        assert s["category"] == "Payload delivery"
+        assert s["to_ids"] in (True, 1, "1")
+        _assert_encrypted_zip(body["event_uuid"], raw, md5)
+
+    def test_repeatable_files(self, http, file_template):
+        b64 = _base64.b64encode(b"x").decode()
+        r = _submit_template(http, file_template, {"att": [
+            {"filename": "a.txt", "data": b64},
+            {"filename": "b.txt", "data": b64},
+        ]})
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        names = {a["value"] for a in _attrs_by_type(event, "attachment")}
+        assert names == {"a.txt", "b.txt"}
+
+    def test_invalid_base64_rejected(self, http, file_template):
+        r = _submit_template(http, file_template,
+                             {"att": [{"filename": "x", "data": "@@@not base64@@@"}]})
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+    def test_missing_filename_rejected(self, http, file_template):
+        b64 = _base64.b64encode(b"x").decode()
+        r = _submit_template(http, file_template, {"att": [{"data": b64}]})
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+
+# ---- Phase-4 event_report element -------------------------------------------
+
+class TestTemplateEventReport:
+    def test_event_report_element_creates_report(self, http, file_template):
+        content = "## Behaviour\n\nBeacons to bad.example every 60s."
+        r = _submit_template(http, file_template, {"notes": content})
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        reports = {rep["name"]: rep for rep in event.get("EventReport", [])}
+        assert "Analyst notes" in reports
+        assert reports["Analyst notes"]["content"] == content
+
+    def test_non_string_event_report_rejected(self, http, file_template):
+        r = _submit_template(http, file_template, {"notes": ["not", "a", "string"]})
+        assert r.status_code == 400, r.text
+        assert "token" not in r.json()
+
+    def test_event_report_on_shipped_template(self, http):
+        """The event_report element also works on a shipped template (not just
+        the fixture) — Suspicious domain triage carries `why_suspicious`."""
+        u = _find_template_uuid(http, "Suspicious domain triage")
+        if not u:
+            pytest.skip("'Suspicious domain triage' not available in the active source")
+        vals = {
+            "domain": "suspicious.example",
+            "date_observed": "2026-07-03T10:00:00+00:00",
+            "tlp": "tlp:amber",
+            "why_suspicious": "Freshly registered; NXDOMAIN churn.",
+        }
+        r = _submit_template(http, u, vals)
+        assert r.status_code == 200, r.text
+        event = _retrieve_event(http, r.json()["token"])
+        report_names = {rep["name"] for rep in event.get("EventReport", [])}
+        assert "Why suspicious" in report_names

@@ -199,9 +199,10 @@ jobs:
         working-directory: draugnet
         run: |
           uvicorn main:app --host 0.0.0.0 --port 8999 &
-          sleep 3
-          curl -sf http://localhost:8999/ \
-            || { echo "Draugnet failed to start"; exit 1; }
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8999/ && break
+            sleep 1
+          done || { echo "Draugnet failed to start"; exit 1; }
 
       # ── Tests ──────────────────────────────────────────────────────────────
       - name: Run tests

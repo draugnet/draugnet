@@ -1,0 +1,299 @@
+{
+  "description": "Capture a ransomware incident in a single pass: family / variant, observation date, affected scope, network indicators, malware-sample hashes, ransom note details, and attribution. Designed to be filled while triage is still ongoing.",
+  "event_defaults": {
+    "analysis": 1,
+    "distribution": 1,
+    "info_template": "Ransomware — {{field:family_name}} — {{field:date_observed}}",
+    "tags": [
+      {
+        "locked": false,
+        "name": "tlp:amber"
+      }
+    ],
+    "threat_level_id": 2
+  },
+  "library_metadata": {
+    "authors": [
+      {
+        "contact": "info@misp-project.org",
+        "name": "MISP Project"
+      }
+    ],
+    "compatible_misp_version": "2.5.0",
+    "tags": [
+      "incident-response",
+      "ransomware",
+      "cryptolocker",
+      "extortion"
+    ]
+  },
+  "misp_default": true,
+  "name": "Ransomware incident",
+  "schema_version": 1,
+  "structure": [
+    {
+      "help": "High-level facts about the incident. If you don't know all of these yet, fill what you can — the template can be edited as the response progresses.",
+      "id": "s_overview",
+      "label": "Incident overview",
+      "type": "section"
+    },
+    {
+      "help": "Best-known label for the family — e.g. *LockBit*, *BlackCat (ALPHV)*, *Akira*. If your AV product gives a more specific variant, capture that. Leave blank if you genuinely don't know yet; better than guessing.",
+      "id": "family_name",
+      "label": "Ransomware family / variant name",
+      "mandatory": true,
+      "misp": {
+        "category": "Antivirus detection",
+        "type": "text"
+      },
+      "parent": "s_overview",
+      "type": "attribute_field"
+    },
+    {
+      "help": "When the encryption / extortion behaviour was first observed (not when the report was filed). ISO 8601 — e.g. `2026-04-25T03:42:00Z`.",
+      "id": "date_observed",
+      "label": "Date first observed",
+      "mandatory": true,
+      "misp": {
+        "category": "Other",
+        "type": "datetime"
+      },
+      "parent": "s_overview",
+      "type": "attribute_field"
+    },
+    {
+      "default_content": "## What happened\n\n_Brief description of the encryption / extortion event._\n\n## Affected systems\n\n- \n\n## Current status\n\n_Containment, recovery, negotiation posture._",
+      "help": "Free-form Markdown — what happened, what's affected, what's the current status. Saved as an EventReport attached to the new event.",
+      "id": "incident_summary",
+      "label": "Incident summary",
+      "mandatory": false,
+      "parent": "s_overview",
+      "type": "event_report"
+    },
+    {
+      "help": "Roughly what was hit. Don't try to be exhaustive — capture representative items, full host inventories belong in the case-management system.",
+      "id": "s_scope",
+      "label": "Affected scope",
+      "type": "section"
+    },
+    {
+      "help": "FQDN or short hostname of an affected machine. Use **+ Add another instance** for additional hosts.",
+      "id": "affected_hostname",
+      "label": "Affected hostname",
+      "mandatory": false,
+      "misp": {
+        "category": "Targeting data",
+        "type": "target-machine"
+      },
+      "parent": "s_scope",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "Username or email of an account where the encryption was observed. Helpful for correlating to the spearphish that delivered the loader, if any.",
+      "id": "affected_user",
+      "label": "Affected user",
+      "mandatory": false,
+      "misp": {
+        "category": "Targeting data",
+        "type": "target-user"
+      },
+      "parent": "s_scope",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "C2 endpoints, leak-site URLs, payment-portal addresses. Anything reachable over the network.",
+      "id": "s_network",
+      "label": "Network indicators",
+      "type": "section"
+    },
+    {
+      "help": "Full URL. Defang if your tooling requires (`hxxp://`, `[.]`). One URL per entry; use **+ Add another instance** for more.",
+      "id": "c2_url",
+      "label": "C2 / leak-site URL",
+      "mandatory": false,
+      "misp": {
+        "category": "Network activity",
+        "to_ids_default": true,
+        "type": "url"
+      },
+      "parent": "s_network",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "Bare domain (no scheme, no path). Use only when you have the domain but not a full URL.",
+      "id": "c2_domain",
+      "label": "C2 domain",
+      "mandatory": false,
+      "misp": {
+        "category": "Network activity",
+        "to_ids_default": true,
+        "type": "domain"
+      },
+      "parent": "s_network",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "Resolves to a C2 endpoint at the time of observation. Note that ransomware C2 is often fast-flux — the IP today may not be the IP in a week.",
+      "id": "c2_ip",
+      "label": "C2 destination IP",
+      "mandatory": false,
+      "misp": {
+        "category": "Network activity",
+        "to_ids_default": true,
+        "type": "ip-dst"
+      },
+      "parent": "s_network",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "If you have the loader / encryptor binary, capture its hashes here. The **File** object groups them so they correlate as a single sample.",
+      "id": "s_sample",
+      "label": "Malware sample",
+      "type": "section"
+    },
+    {
+      "help": "At minimum, capture filename + SHA-256. MD5 / SHA-1 are useful for matching against legacy feeds.",
+      "id": "obj_sample",
+      "label": "Sample (loader or encryptor)",
+      "mandatory": false,
+      "object_template": {
+        "minimum_version": 25,
+        "name": "file",
+        "uuid": "688c46fb-5edb-40a3-8273-1af7923e2215"
+      },
+      "parent": "s_sample",
+      "relations": [
+        {
+          "help_override": "Filename as observed on the affected machine. Often randomised by ransomware loaders — capture what you saw.",
+          "label_override": "Filename on disk",
+          "mandatory": true,
+          "object_relation": "filename"
+        },
+        {
+          "help_override": "Strongly preferred.",
+          "label_override": "SHA-256",
+          "mandatory": false,
+          "object_relation": "sha256"
+        },
+        {
+          "help_override": "Optional — helpful for matching legacy AV signatures.",
+          "label_override": "SHA-1",
+          "mandatory": false,
+          "object_relation": "sha1"
+        },
+        {
+          "help_override": "Optional. SHA-256 is preferred.",
+          "label_override": "MD5",
+          "mandatory": false,
+          "object_relation": "md5"
+        },
+        {
+          "help_override": "Useful collision filter when only a partial hash is available.",
+          "label_override": "Size (bytes)",
+          "mandatory": false,
+          "object_relation": "size-in-bytes"
+        }
+      ],
+      "repeatable": true,
+      "type": "object_field"
+    },
+    {
+      "help": "Information about the ransom itself — note, payment address, amount.",
+      "id": "s_ransom",
+      "label": "Ransom demand",
+      "type": "section"
+    },
+    {
+      "help": "Filename(s) of the ransom note dropped on affected systems — e.g. `README_FOR_DECRYPT.txt`. Commonly identical across the family.",
+      "id": "ransom_note_filename",
+      "label": "Ransom note filename",
+      "mandatory": false,
+      "misp": {
+        "category": "Payload installation",
+        "type": "filename"
+      },
+      "parent": "s_ransom",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "If the demand specifies a Bitcoin address, capture it verbatim. One per entry.",
+      "id": "btc_address",
+      "label": "Bitcoin payment address",
+      "mandatory": false,
+      "misp": {
+        "category": "Financial fraud",
+        "to_ids_default": true,
+        "type": "btc"
+      },
+      "parent": "s_ransom",
+      "repeatable": true,
+      "type": "attribute_field"
+    },
+    {
+      "help": "Free-form — e.g. `2.5 BTC`, `$50,000 in Monero`, `unknown`. Captured as text because units vary.",
+      "id": "ransom_amount",
+      "label": "Ransom amount",
+      "mandatory": false,
+      "misp": {
+        "category": "Financial fraud",
+        "type": "text"
+      },
+      "parent": "s_ransom",
+      "type": "attribute_field"
+    },
+    {
+      "help": "TLP for the report and any galaxy-cluster attribution you can support with evidence.",
+      "id": "s_classification",
+      "label": "Classification and attribution",
+      "type": "section"
+    },
+    {
+      "help": "Pick one. Override the `tlp:amber` default if your analyst's TLP differs.",
+      "id": "tlp",
+      "label": "TLP",
+      "mandatory": true,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_taxonomies": [
+        "tlp"
+      ],
+      "type": "tag_field"
+    },
+    {
+      "help": "Pick the matching cluster from the *ransomware* galaxy. Distinct from the **Ransomware family / variant name** text field above — that's free-form, this is the curated cluster id.",
+      "id": "ransomware_family",
+      "label": "Ransomware family (galaxy)",
+      "mandatory": false,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_galaxy_types": [
+        "ransomware"
+      ],
+      "type": "galaxy_field"
+    },
+    {
+      "help": "Optional. Many ransomware operations are run by named affiliates — only fill in if you have evidence beyond the family alone.",
+      "id": "threat_actor",
+      "label": "Suspected threat actor",
+      "mandatory": false,
+      "multiple": false,
+      "parent": "s_classification",
+      "restrict_galaxy_types": [
+        "threat-actor"
+      ],
+      "type": "galaxy_field"
+    },
+    {
+      "content": "**Follow-up:** ransomware reports almost always need updates. The free-text **Short incident summary** field above is intentionally narrow — write the detailed timeline, lessons learned, and IR steps in an *event report* on the resulting event, not in the template fields.",
+      "id": "note_followup",
+      "type": "text_block"
+    }
+  ],
+  "uuid": "47011a02-2069-4d07-8bf1-e0fdf93e635a"
+}
